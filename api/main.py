@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel, field_validator
 from typing import Literal
+import logging
 
 app = FastAPI()
 
@@ -30,10 +31,14 @@ class Event(BaseModel):
             raise ValueError("slice_thickness must be > 0")
         return v
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
 @app.post("/events")
 async def receive_event(event: Event):
-    # Convert Pydantic model to dictionary and push to queue
+    logging.info(f"received_event patient_id={event.patient_id} modality={event.modality}")
     event_queue.append(event.model_dump())
-
-    # Return response indicating the event has been queued
     return {"status": "queued"}

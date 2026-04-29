@@ -1,9 +1,15 @@
 import time
+import logging
 from api.main import event_queue
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
 def run_worker():
-    # Start the worker process
-    print("Worker started...")
+    logging.info("worker_started")
 
     while True:
         # Check if there are events in the queue
@@ -11,8 +17,8 @@ def run_worker():
             # Retrieve the first event (FIFO)
             event = event_queue.pop(0)
 
-            # Simulate processing
-            print("Processing event:", event)
+            # Log processing event
+            logging.info(f"processing_event patient_id={event['patient_id']}")
 
         # Wait before checking the queue again
         time.sleep(2)
