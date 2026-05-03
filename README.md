@@ -1,15 +1,17 @@
-
 # Healthcare Data Pipeline
 
 ## Overview
-This project simulates a healthcare data pipeline that processes medical imaging metadata using an event-driven architecture.
+This project simulates a healthcare data pipeline that processes medical imaging metadata using an event-driven architecture.  
+It demonstrates the transition from a local queue-based system to a cloud-native Pub/Sub design.
+
+---
 
 ## Goal
-- Build a FastAPI backend for receiving medical metadata
-- Process data asynchronously using a queue-based pattern
-- Prepare for integration with Pub/Sub
-- Store structured data in BigQuery (planned)
-- Apply data validation based on healthcare domain rules
+- Build a FastAPI backend for receiving medical imaging metadata
+- Validate healthcare data using domain constraints
+- Simulate asynchronous processing using a local queue
+- Design migration path to Google Cloud Pub/Sub
+- Prepare for downstream storage (BigQuery, future work)
 
 ---
 
@@ -55,7 +57,7 @@ flowchart LR
 * modality must be one of: CT / MRI / US
 * slice_thickness must be > 0
 * study_date must follow YYYY-MM-DD format
-* data must be validated before processing
+* All data is validated before processing
 
 ---
 
@@ -63,19 +65,22 @@ flowchart LR
 
 ### API (FastAPI)
 
-* Receives POST /events requests
+* Receives POST `/events` requests
 * Validates medical metadata using Pydantic
+* Logs ingestion events
 * Pushes validated data into an in-memory queue
 
 ### Queue (Local Simulation)
 
-* Simple Python list used as a message queue
-* Simulates asynchronous processing
+* In-memory Python list used as a temporary message buffer
+* Simulates asynchronous decoupling between API and processing layer
+* Used only for local development and architecture validation
 
 ### Worker
 
-* Continuously polls the queue
-* Processes incoming events
+* Continuously polls the in-memory queue
+* Processes incoming events sequentially
+* Represents a future stateless processing service
 
 ---
 
@@ -109,27 +114,33 @@ curl -X POST http://127.0.0.1:8000/events \
 * REST API (FastAPI)
 * Event-driven architecture
 * Producer / Consumer model
-* Message queue (simulated)
+* Message queue (local simulation)
 * Data validation in healthcare systems
 
 ---
 
 ## Status
 
-Current phase: **Local event-driven implementation complete**
+Current phase: **Local event-driven system complete**
 
-* FastAPI endpoint implemented
-* Validation rules applied
+* FastAPI ingestion layer implemented
+* Pydantic validation applied
+* Logging enabled
 * In-memory queue introduced
 * Worker process implemented
 
-Next step: **Replace local queue with Pub/Sub (GCP)**
-
 ---
 
-## Future Work
+## Migration Plan
 
-* Integrate Google Cloud Pub/Sub
-* Deploy services to Cloud Run
-* Store processed data in BigQuery
-* Add logging and error handling
+The current in-memory queue will be replaced by:
+
+* Google Cloud Pub/Sub (managed message broker)
+* Enables durability, scalability, and decoupling
+* Supports multiple independent consumers
+
+Future extensions:
+
+* Cloud Run deployment
+* BigQuery storage integration
+* Observability (Cloud Logging / Tracing)
