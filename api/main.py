@@ -3,10 +3,9 @@ from pydantic import BaseModel, field_validator
 from typing import Literal
 import logging
 
-app = FastAPI()
+from pubsub_client import publish_event
 
-# In-memory queue (temporary, will be replaced by Pub/Sub)
-event_queue = []
+app = FastAPI()
 
 # ----------------------------
 # Logging configuration
@@ -15,6 +14,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
+
 
 class Event(BaseModel):
     """
@@ -37,7 +37,7 @@ class Event(BaseModel):
 @app.post("/events")
 async def receive_event(event: Event):
     """
-    Receive medical event and enqueue it for processing
+    Receive medical event and publish it to Pub/Sub
     """
 
     # Log incoming request
@@ -47,26 +47,29 @@ async def receive_event(event: Event):
     )
 
     try:
-        # Convert to dict (serialization boundary)
+        # Convert Pydantic model to dictionary
         event_dict = event.model_dump()
 
-        # Temporary queue (will be replaced by Pub/Sub publish)
-        event_queue.append(event_dict)
+        # Publish event to Google Cloud Pub/Sub
+        message_id = publish_event(event_dict)
 
-        # Log successful enqueue
+        # Log successful publish
         logging.info(
-            f"queued_event patient_id={event.patient_id} queue_size={len(event_queue)}"
+            f"published_event "
+            f"patient_id={event.patient_id} "
+            f"message_id={message_id}"
         )
 
         return {
-            "status": "queued",
-            "queue_size": len(event_queue)
+            "status": "published",
+            "message_id": message_id
         }
 
     except Exception as e:
-        # Error visibility for debugging
-        logging.error(f"failed_to_queue_event error={str(e)}")
+        # Log full error details
+        logging.exception(f"failed_to_publish_event error={str(e)}")
+
         return {
             "status": "error",
-            "message": "failed to process event"
+            "message": "failed to publish event"
         }
