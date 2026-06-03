@@ -1,16 +1,24 @@
-from google.cloud import pubsub_v1
 import json
 import logging
+import os
 import uuid
+
 import redis
+from dotenv import load_dotenv
+from google.cloud import pubsub_v1
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-PROJECT_ID = "healthcare-pipeline-yk-01"
-SUBSCRIPTION_ID = "healthcare-sub"
+PROJECT_ID = os.getenv("PROJECT_ID", "healthcare-pipeline-yk-01")
+SUBSCRIPTION_ID = os.getenv("SUBSCRIPTION_ID", "healthcare-sub")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 
 subscriber = pubsub_v1.SubscriberClient()
 subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
@@ -18,7 +26,7 @@ subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_ID)
 # ----------------------------
 # Redis (dedup store)
 # ----------------------------
-r = redis.Redis(host="localhost", port=6379, db=0)
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 
 def already_processed(event_id: str) -> bool:

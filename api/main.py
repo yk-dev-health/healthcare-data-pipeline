@@ -1,9 +1,12 @@
+from datetime import date, datetime
+import logging
+import uuid
+
 from fastapi import FastAPI
 from pydantic import BaseModel, field_validator
 from typing import Literal
-import logging
 
-from pubsub_client import publish_event
+from api.pubsub_client import publish_event
 
 app = FastAPI()
 
@@ -22,7 +25,7 @@ class Event(BaseModel):
     """
     patient_id: str
     modality: Literal["CT", "MRI", "US"]
-    study_date: str
+    study_date: date
     slice_thickness: float
     device_id: str
 
@@ -47,8 +50,10 @@ async def receive_event(event: Event):
     )
 
     try:
-        # Convert Pydantic model to dictionary
-        event_dict = event.model_dump()
+        # Convert Pydantic model to JSON-safe dictionary
+        event_dict = event.model_dump(mode="json")
+        event_dict["event_id"] = str(uuid.uuid4())
+        event_dict["received_at"] = datetime.utcnow().isoformat() + "Z"
 
         # Publish event to Google Cloud Pub/Sub
         message_id = publish_event(event_dict)

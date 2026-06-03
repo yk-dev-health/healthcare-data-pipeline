@@ -1,29 +1,29 @@
 # Healthcare Data Pipeline
 
 ## Overview
-This project simulates a healthcare data pipeline that processes medical imaging metadata using an event-driven architecture.  
-It demonstrates the transition from a local queue-based system to a cloud-native Pub/Sub design.
+This project implements a healthcare data pipeline that processes medical imaging metadata using an event-driven architecture.  
+It is designed around Google Cloud Pub/Sub for asynchronous event delivery and worker processing.
 
 ---
 
 ## Goal
 - Build a FastAPI backend for receiving medical imaging metadata
 - Validate healthcare data using domain constraints
-- Simulate asynchronous processing using a local queue
-- Design migration path to Google Cloud Pub/Sub
+- Use Google Cloud Pub/Sub for asynchronous messaging
+- Design a worker-based processing pipeline for clinical events
 - Prepare for downstream storage (BigQuery, future work)
 
 ---
 
 ## Architecture
 
-### Current (Local Simulation)
+### Current (Cloud-oriented)
 
 ```mermaid
 flowchart LR
     Client --> API
-    API --> Queue
-    Queue --> Worker
+    API --> PubSub
+    PubSub --> Worker
 ````
 
 ### Target (Cloud Architecture)
@@ -68,19 +68,18 @@ flowchart LR
 * Receives POST `/events` requests
 * Validates medical metadata using Pydantic
 * Logs ingestion events
-* Pushes validated data into an in-memory queue
+* Publishes validated events to Google Cloud Pub/Sub
 
-### Queue (Local Simulation)
+### Pub/Sub Integration
 
-* In-memory Python list used as a temporary message buffer
-* Simulates asynchronous decoupling between API and processing layer
-* Used only for local development and architecture validation
+* Uses `google-cloud-pubsub` for publish/subscribe topology
+* Enables cloud-based decoupling between ingestion and processing
 
 ### Worker
 
-* Continuously polls the in-memory queue
-* Processes incoming events sequentially
-* Represents a future stateless processing service
+* Receives messages from Pub/Sub subscription
+* Processes events and applies Redis-based idempotency
+* Represents a stateless processing service for downstream handling
 
 ---
 
@@ -90,7 +89,7 @@ flowchart LR
 
 ```bash
 cd api
-uvicorn main:app --reload
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Start Worker
@@ -98,6 +97,10 @@ uvicorn main:app --reload
 ```bash
 python worker/worker.py
 ```
+
+API will be available at `http://127.0.0.1:8000`.
+
+> Note: Docker support has been removed from this repository. Run the API and worker with native Python commands.
 
 ### Send Test Request
 
@@ -114,20 +117,21 @@ curl -X POST http://127.0.0.1:8000/events \
 * REST API (FastAPI)
 * Event-driven architecture
 * Producer / Consumer model
-* Message queue (local simulation)
+* Google Cloud Pub/Sub messaging
 * Data validation in healthcare systems
 
 ---
 
 ## Status
 
-Current phase: **Local event-driven system complete**
+Current phase: **Cloud Pub/Sub-ready event-driven system**
 
 * FastAPI ingestion layer implemented
-* Pydantic validation applied
+* Pydantic validation applied, including date validation
 * Logging enabled
-* In-memory queue introduced
-* Worker process implemented
+* Google Cloud Pub/Sub integration implemented
+* Worker process implemented with Redis-based idempotency
+* Docker support removed; repository now targets direct Python execution
 
 ---
 

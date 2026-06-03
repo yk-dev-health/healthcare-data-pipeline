@@ -1,13 +1,16 @@
-from google.cloud import pubsub_v1
 import json
+import os
+from dotenv import load_dotenv
+from google.cloud import pubsub_v1
+
+load_dotenv()
+
+# Define your GCP project and topic from environment variables
+PROJECT_ID = os.getenv("PROJECT_ID", "healthcare-pipeline-yk-01")
+TOPIC_ID = os.getenv("TOPIC_ID", "healthcare-events")
 
 # Initialise publisher client
 publisher = pubsub_v1.PublisherClient()
-
-# Define your GCP project and topic
-PROJECT_ID = "healthcare-pipeline-yk-01"
-TOPIC_ID = "healthcare-events"
-
 topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
 
 
