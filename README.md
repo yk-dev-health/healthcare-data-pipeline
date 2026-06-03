@@ -8,9 +8,9 @@ It is designed around Google Cloud Pub/Sub for asynchronous event delivery and w
 
 ## Goal
 - Build a FastAPI backend for receiving medical imaging metadata
-- Validate healthcare data using domain constraints
-- Use Google Cloud Pub/Sub for asynchronous messaging
-- Design a worker-based processing pipeline for clinical events
+- Validate healthcare metadata using domain constraints
+- Apply basic clinical data quality checks
+- Use Google Cloud Pub/Sub-style asynchronous worker processing
 - Prepare for downstream storage (BigQuery, future work)
 
 ---
@@ -78,7 +78,8 @@ flowchart LR
 ### Worker
 
 * Receives messages from Pub/Sub subscription
-* Processes events and applies Redis-based idempotency
+* Processes events and performs basic healthcare data quality checks
+* Applies Redis-based idempotency for duplicate protection
 * Represents a stateless processing service for downstream handling
 
 ---
@@ -102,6 +103,12 @@ API will be available at `http://127.0.0.1:8000`.
 
 > Note: Docker support has been removed from this repository. Run the API and worker with native Python commands.
 
+### Run tests
+
+```bash
+pytest
+```
+
 ### Send Test Request
 
 ```bash
@@ -117,8 +124,8 @@ curl -X POST http://127.0.0.1:8000/events \
 * REST API (FastAPI)
 * Event-driven architecture
 * Producer / Consumer model
-* Google Cloud Pub/Sub messaging
-* Data validation in healthcare systems
+* Google Cloud Pub/Sub-style asynchronous messaging
+* Healthcare metadata validation and quality checks
 
 ---
 
@@ -127,8 +134,9 @@ curl -X POST http://127.0.0.1:8000/events \
 Current phase: **Cloud Pub/Sub-ready event-driven system**
 
 * FastAPI ingestion layer implemented
-* Pydantic validation applied, including date validation
+* Pydantic validation applied, including domain-specific checks
 * Logging enabled
+* Healthcare data quality evaluation added in worker
 * Google Cloud Pub/Sub integration implemented
 * Worker process implemented with Redis-based idempotency
 * Docker support removed; repository now targets direct Python execution

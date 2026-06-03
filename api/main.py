@@ -34,6 +34,14 @@ class Event(BaseModel):
         # Ensure slice thickness is physically valid
         if v <= 0:
             raise ValueError("slice_thickness must be > 0")
+        if v > 50:
+            raise ValueError("slice_thickness is unrealistic")
+        return v
+
+    @field_validator("study_date")
+    def validate_study_date(cls, v):
+        if v > date.today():
+            raise ValueError("study_date must not be in the future")
         return v
 
 

@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import uuid
+from datetime import date, datetime
+from typing import Any
 
 import redis
 from dotenv import load_dotenv
@@ -38,6 +40,53 @@ def mark_processed(event_id: str):
     r.setex(event_id, 86400, "1")
 
 
+def parse_date(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    if isinstance(value, date):
+        return value
+    return None
+
+
+def process_event(event: dict) -> dict:
+    issues = []
+    study_date = parse_date(event.get("study_date"))
+    if study_date is None:
+        issues.append("study_date_invalid")
+    elif study_date > date.today():
+        issues.append("study_date_in_future")
+
+    slice_thickness = event.get("slice_thickness")
+    if slice_thickness is None:
+        issues.append("slice_thickness_missing")
+    elif not isinstance(slice_thickness, (int, float)):
+        issues.append("slice_thickness_type_error")
+    elif slice_thickness <= 0:
+        issues.append("slice_thickness_nonpositive")
+    elif slice_thickness > 50:
+        issues.append("slice_thickness_unrealistic")
+
+    modality = event.get("modality")
+    if modality not in {"CT", "MRI", "US"}:
+        issues.append("modality_invalid")
+
+    patient_id = event.get("patient_id")
+    if not patient_id or not isinstance(patient_id, str):
+        issues.append("patient_id_missing")
+    elif not patient_id.startswith("P"):
+        issues.append("patient_id_format")
+
+    quality_score = max(0, 100 - len(issues) * 20)
+    return {
+        "quality_score": quality_score,
+        "issues": issues,
+        "processed_at": datetime.utcnow().isoformat() + "Z"
+    }
+
+
 def callback(message):
     try:
         event = json.loads(message.data.decode("utf-8"))
@@ -62,12 +111,20 @@ def callback(message):
         # ----------------------------
         # processing
         # ----------------------------
+        quality_report = process_event(event)
+
         logging.info(
             f"processing_event "
             f"event_id={event_id} "
-            f"patient_id={event['patient_id']} "
-            f"modality={event['modality']}"
+            f"patient_id={event.get('patient_id')} "
+            f"modality={event.get('modality')} "
+            f"quality_score={quality_report['quality_score']}"
         )
+
+        if quality_report["issues"]:
+            logging.warning(
+                f"quality_issues event_id={event_id} issues={quality_report['issues']}"
+            )
 
         # ここでDB保存 / AI処理など
         # process(event)

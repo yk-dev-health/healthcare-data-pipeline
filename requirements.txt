@@ -23,3 +23,4 @@ redis==5.0.7
 # Logging / utilities (optional but common in production)
 # -----------------------------
 python-dotenv==1.0.1
+pytest==7.4.2
