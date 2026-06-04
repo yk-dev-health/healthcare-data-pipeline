@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import redis
@@ -83,7 +83,7 @@ def process_event(event: dict) -> dict:
     return {
         "quality_score": quality_score,
         "issues": issues,
-        "processed_at": datetime.utcnow().isoformat() + "Z"
+        "processed_at": datetime.now(timezone.utc).isoformat()
     }
 
 
