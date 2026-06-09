@@ -1,17 +1,23 @@
 # Healthcare Data Pipeline
 
 ## Overview
-This project implements a healthcare data pipeline that processes medical imaging metadata using an event-driven architecture.  
-It is designed around Google Cloud Pub/Sub for asynchronous event delivery and worker processing.
+This project demonstrates the design of a healthcare event-driven data pipeline focused on data validation, quality control, idempotent processing, and operational reliability.
+
+The system uses asynchronous messaging and worker-based processing to decouple data ingestion from downstream processing, reflecting patterns commonly used in production data platforms.
+
+---
+
+## Summary
+This repository is a portfolio prototype for healthcare data engineering. It demonstrates a validated clinical metadata ingestion API, asynchronous worker processing, basic healthcare quality checks, and automated test coverage.
 
 ---
 
 ## Goal
 - Build a FastAPI backend for receiving medical imaging metadata
 - Validate healthcare metadata using domain constraints
-- Apply basic clinical data quality checks
-- Use Google Cloud Pub/Sub-style asynchronous worker processing
-- Prepare for downstream storage (BigQuery, future work)
+- Apply basic clinical data quality checks for imaging metadata
+- Demonstrate asynchronous worker processing with Pub/Sub-style architecture
+- Prepare for downstream storage and analytics extension
 
 ---
 
@@ -55,8 +61,8 @@ flowchart LR
 ## Validation Rules
 
 * modality must be one of: CT / MRI / US
-* slice_thickness must be > 0
-* study_date must follow YYYY-MM-DD format
+* slice_thickness must be > 0 and within a realistic range
+* study_date must follow YYYY-MM-DD format and not be in the future
 * All data is validated before processing
 
 ---
@@ -79,6 +85,7 @@ flowchart LR
 
 * Receives messages from Pub/Sub subscription
 * Processes events and performs basic healthcare data quality checks
+* Computes a quality score and logs issues for invalid metadata
 * Applies Redis-based idempotency for duplicate protection
 * Represents a stateless processing service for downstream handling
 
@@ -131,7 +138,7 @@ curl -X POST http://127.0.0.1:8000/events \
 
 ## Status
 
-Current phase: **Cloud Pub/Sub-ready event-driven system**
+Current phase: **Healthcare event pipeline prototype**
 
 * FastAPI ingestion layer implemented
 * Pydantic validation applied, including domain-specific checks
@@ -139,7 +146,26 @@ Current phase: **Cloud Pub/Sub-ready event-driven system**
 * Healthcare data quality evaluation added in worker
 * Google Cloud Pub/Sub integration implemented
 * Worker process implemented with Redis-based idempotency
+* pytest coverage added for API and worker validation
 * Docker support removed; repository now targets direct Python execution
+
+---
+
+## Scope and limitations
+
+This repository is a portfolio prototype, not a full clinical data quality analytics system.
+
+Included:
+* Metadata ingestion and validation
+* Asynchronous worker pattern
+* Quality scoring for incoming events
+* Duplicate protection via Redis
+
+Not included:
+* Full clinical reporting or data warehousing
+* Production GCP deployment configuration
+* Real medical imaging file handling (DICOM/FHIR)
+* Complete end-to-end analytics pipeline
 
 ---
 
