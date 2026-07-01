@@ -1,8 +1,9 @@
 from datetime import date, timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 
-from api.main import Event
+from api.main import Event, app
 
 
 def test_event_model_valid():
@@ -30,3 +31,27 @@ def test_event_model_future_date():
             slice_thickness=1.2,
             device_id="MRI_001"
         )
+
+
+def test_dicom_payload_is_anonymized_and_accepted():
+    client = TestClient(app)
+    response = client.post(
+        "/dicom/events",
+        json={
+            "patient_name": "John Doe",
+            "patient_birth_date": "1980-01-01",
+            "study_uid": "1.2.826.0.1.3680043.8.498.123456",
+            "modality": "CT",
+            "kVp": 120,
+            "mA": 250,
+            "consent_logged": True,
+            "source": "PACS"
+        }
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "queued"
+    assert payload["deidentified"]["patient_name"] == "REDACTED"
+    assert payload["deidentified"]["patient_birth_date"] == "REDACTED"
+    assert payload["deidentified"]["study_uid"] == "1.2.826.0.1.3680043.8.498.123456"

@@ -1,18 +1,18 @@
-from datetime import date, datetime
+import json
 import logging
 import uuid
-
-from fastapi import FastAPI
-from pydantic import BaseModel, field_validator
+from datetime import date, datetime
 from typing import Literal
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, field_validator
+
 from api.pubsub_client import publish_event
+from worker.worker import enqueue_dicom_event, get_dicom_search_results, process_dicom_event
 
-app = FastAPI()
+app = FastAPI(title="Healthcare Data Pipeline", version="0.2.0")
 
-# ----------------------------
-# Logging configuration
-# ----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
@@ -23,6 +23,7 @@ class Event(BaseModel):
     """
     Medical imaging event schema
     """
+
     patient_id: str
     modality: Literal["CT", "MRI", "US"]
     study_date: date
@@ -31,7 +32,6 @@ class Event(BaseModel):
 
     @field_validator("slice_thickness")
     def validate_slice_thickness(cls, v):
-        # Ensure slice thickness is physically valid
         if v <= 0:
             raise ValueError("slice_thickness must be > 0")
         if v > 50:
@@ -45,44 +45,122 @@ class Event(BaseModel):
         return v
 
 
+class DicomIngestionPayload(BaseModel):
+    """DICOM ingestion payload for radiology workflows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_name: str | None = None
+    patient_birth_date: date | None = None
+    study_uid: str
+    modality: Literal["CT", "MRI", "US", "DX", "CR"]
+    kVp: float | None = None
+    mA: float | None = None
+    consent_logged: bool = False
+    source: str = "PACS"
+    purpose: Literal["diagnostic_support", "research", "marketing"] = "diagnostic_support"
+
+    @field_validator("patient_name")
+    def validate_patient_name(cls, v):
+        if v is None:
+            return v
+        if len(v.strip()) < 2:
+            raise ValueError("patient_name is too short")
+        return v.strip()
+
+    @field_validator("kVp", "mA")
+    def validate_technical_values(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError("technical values must be > 0")
+        return v
+
+
+@app.middleware("http")
+async def consent_middleware(request: Request, call_next):
+    if request.url.path == "/dicom/events":
+        try:
+            body = await request.body()
+            if body:
+                payload = json.loads(body.decode("utf-8"))
+                if payload.get("consent_logged") is not True:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Consent log is required for medical data processing"},
+                    )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+    return await call_next(request)
+
+
 @app.post("/events")
 async def receive_event(event: Event):
     """
-    Receive medical event and publish it to Pub/Sub
+    Receive medical event and publish it to Pub/Sub.
     """
 
-    # Log incoming request
     logging.info(
         f"received_event patient_id={event.patient_id} "
         f"modality={event.modality}"
     )
 
     try:
-        # Convert Pydantic model to JSON-safe dictionary
         event_dict = event.model_dump(mode="json")
         event_dict["event_id"] = str(uuid.uuid4())
         event_dict["received_at"] = datetime.utcnow().isoformat() + "Z"
 
-        # Publish event to Google Cloud Pub/Sub
         message_id = publish_event(event_dict)
 
-        # Log successful publish
         logging.info(
-            f"published_event "
-            f"patient_id={event.patient_id} "
-            f"message_id={message_id}"
+            f"published_event patient_id={event.patient_id} message_id={message_id}"
         )
 
-        return {
-            "status": "published",
-            "message_id": message_id
-        }
+        return {"status": "published", "message_id": message_id}
 
     except Exception as e:
-        # Log full error details
         logging.exception(f"failed_to_publish_event error={str(e)}")
+        return {"status": "error", "message": "failed to publish event"}
 
-        return {
-            "status": "error",
-            "message": "failed to publish event"
-        }
+
+@app.post("/dicom/events")
+async def receive_dicom_event(payload: DicomIngestionPayload):
+    """Accept DICOM metadata, anonymize it, and queue it for background processing."""
+
+    if payload.purpose != "diagnostic_support":
+        return JSONResponse(
+            status_code=403,
+            content={"status": "rejected", "detail": "Purpose limitation violated"},
+        )
+
+    deidentified = {
+        "patient_name": "REDACTED" if payload.patient_name else None,
+        "patient_birth_date": "REDACTED" if payload.patient_birth_date else None,
+        "study_uid": payload.study_uid,
+        "modality": payload.modality,
+        "kVp": payload.kVp,
+        "mA": payload.mA,
+        "source": payload.source,
+    }
+
+    event_dict = payload.model_dump(mode="json")
+    event_dict["event_id"] = str(uuid.uuid4())
+    event_dict["received_at"] = datetime.utcnow().isoformat() + "Z"
+    event_dict["deidentified"] = deidentified
+
+    queue_status = enqueue_dicom_event(event_dict)
+    publish_event(event_dict)
+    processing_result = process_dicom_event(event_dict)
+
+    return {
+        "status": "queued",
+        "event_id": event_dict["event_id"],
+        "deidentified": deidentified,
+        "queue": queue_status,
+        "processing": processing_result,
+    }
+
+
+@app.get("/dicom/search")
+async def search_dicom_events(study_uid: str | None = None):
+    """Search indexed DICOM processing results by study UID."""
+
+    return get_dicom_search_results(study_uid=study_uid)

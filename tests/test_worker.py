@@ -1,4 +1,4 @@
-from worker.worker import process_event
+from worker.worker import process_dicom_event, process_event
 
 
 def test_process_event_valid():
@@ -32,3 +32,22 @@ def test_process_event_quality_issues():
     assert "modality_invalid" in result["issues"]
     assert "slice_thickness_unrealistic" in result["issues"]
     assert "patient_id_format" in result["issues"]
+
+
+def test_process_dicom_event_redacts_sensitive_fields():
+    event = {
+        "patient_name": "Jane Doe",
+        "patient_birth_date": "1985-05-17",
+        "study_uid": "1.2.826.0.1.3680043.8.498.123456",
+        "modality": "CT",
+        "kVp": 120,
+        "mA": 250,
+        "source": "PACS"
+    }
+
+    result = process_dicom_event(event)
+
+    assert result["deidentified"]["patient_name"] == "REDACTED"
+    assert result["deidentified"]["patient_birth_date"] == "REDACTED"
+    assert result["deidentified"]["study_uid"] == "1.2.826.0.1.3680043.8.498.123456"
+    assert result["indexed_fields"]["modality"] == "CT"
