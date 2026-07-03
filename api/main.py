@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from api.pubsub_client import publish_event
-from worker.worker import enqueue_dicom_event, get_dicom_search_results, process_dicom_event
+from worker.celery_app import process_dicom_task
+from worker.worker import enqueue_dicom_event, get_dicom_search_results
 
 app = FastAPI(title="Healthcare Data Pipeline", version="0.2.0")
 
@@ -146,16 +147,20 @@ async def receive_dicom_event(payload: DicomIngestionPayload):
     event_dict["received_at"] = datetime.utcnow().isoformat() + "Z"
     event_dict["deidentified"] = deidentified
 
-    queue_status = enqueue_dicom_event(event_dict)
     publish_event(event_dict)
-    processing_result = process_dicom_event(event_dict)
+
+    try:
+        celery_result = process_dicom_task.apply_async(args=[event_dict])
+        queue_status = {"queue": "celery", "task_id": celery_result.id}
+    except Exception as exc:
+        logging.warning(f"celery_enqueue_failed error={exc}")
+        queue_status = enqueue_dicom_event(event_dict)
 
     return {
         "status": "queued",
         "event_id": event_dict["event_id"],
         "deidentified": deidentified,
         "queue": queue_status,
-        "processing": processing_result,
     }
 
 

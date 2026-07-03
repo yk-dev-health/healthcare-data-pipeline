@@ -61,6 +61,14 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 python worker/worker.py
 ```
 
+```bash
+redis-server
+```
+
+```bash
+celery -A worker.celery_app.celery_app worker --loglevel=info
+```
+
 ### Docker
 
 ```bash

@@ -1,4 +1,9 @@
+from worker.celery_app import process_dicom_task
 from worker.worker import process_dicom_event, process_event
+
+
+def test_celery_task_is_registered():
+    assert process_dicom_task.name == "worker.process_dicom_task"
 
 
 def test_process_event_valid():
