@@ -82,6 +82,14 @@ docker run -p 8000:8000 healthcare-data-pipeline
 python -m pytest
 ```
 
+### Push changes
+
+```bash
+git add .
+git commit -m "<message>"
+git push origin main
+```
+
 ---
 
 ## API endpoints
