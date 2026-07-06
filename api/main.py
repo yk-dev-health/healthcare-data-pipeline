@@ -4,13 +4,13 @@ import uuid
 from datetime import date, datetime
 from typing import Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from api.pubsub_client import publish_event
 from worker.celery_app import process_dicom_task
-from worker.worker import enqueue_dicom_event, get_dicom_search_results, process_dicom_event
+from worker.worker import enqueue_dicom_event, get_consent_log_entries, get_dicom_search_results, process_dicom_event
 
 app = FastAPI(title="Healthcare Data Pipeline", version="0.2.0")
 CONSENT_LOG: dict[str, dict[str, str | bool]] = {}
@@ -75,6 +75,15 @@ class DicomIngestionPayload(BaseModel):
         if v is not None and v <= 0:
             raise ValueError("technical values must be > 0")
         return v
+
+
+def require_role(role: str):
+    def _checker(request: Request):
+        if request.headers.get("x-role", "").lower() != role:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return True
+
+    return _checker
 
 
 def register_consent_log(payload: dict) -> str:
@@ -187,3 +196,11 @@ async def search_dicom_events(study_uid: str | None = None):
     """Search indexed DICOM processing results by study UID."""
 
     return get_dicom_search_results(study_uid=study_uid)
+
+
+@app.get("/admin/consent-log")
+async def read_consent_log(request: Request):
+    """Expose consent logs for administrative review with a simple RBAC check."""
+
+    require_role("admin")(request)
+    return {"consent_log": get_consent_log_entries()}

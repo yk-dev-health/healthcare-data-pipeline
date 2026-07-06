@@ -7,6 +7,20 @@ This repository now demonstrates a radiology-focused healthcare ingestion pipeli
 
 ---
 
+## Planned roadmap (July-August)
+
+### July early/mid (W1-W3)
+- Add GDPR/FHIR context to the README and project narrative.
+- Refine the repository structure so the DICOM workflow story is easy to follow for recruiters and interviewers.
+- Commit the latest GCP Pub/Sub-compatible architecture updates and keep the GitHub history clean.
+
+### Late July to mid August (W4-W7)
+- Finalise the portfolio presentation with a polished README, screenshots, and a short demo walkthrough.
+- Lock in the final architecture and ensure the repository is stable, reproducible, and easy to run.
+- Prepare the CV and GitHub summary so the project is framed as a production-style healthcare data engineering portfolio piece.
+
+---
+
 ## What changed
 - Added a FastAPI endpoint for DICOM metadata ingestion at /dicom/events.
 - Implemented automatic de-identification of patient name and birth date before storage or downstream processing.

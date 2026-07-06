@@ -55,3 +55,14 @@ def test_dicom_payload_is_anonymized_and_accepted():
     assert payload["deidentified"]["patient_name"] == "REDACTED"
     assert payload["deidentified"]["patient_birth_date"] == "REDACTED"
     assert payload["deidentified"]["study_uid"] == "1.2.826.0.1.3680043.8.498.123456"
+
+
+def test_admin_consent_log_requires_admin_role():
+    client = TestClient(app)
+
+    forbidden = client.get("/admin/consent-log")
+    assert forbidden.status_code == 403
+
+    allowed = client.get("/admin/consent-log", headers={"x-role": "admin"})
+    assert allowed.status_code == 200
+    assert "consent_log" in allowed.json()

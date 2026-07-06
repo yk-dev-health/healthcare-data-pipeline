@@ -49,6 +49,43 @@ DICOM_QUEUE_NAME = "dicom_queue"
 DICOM_INDEX: dict[str, dict[str, Any]] = {}
 CONSENT_LOG: dict[str, dict[str, Any]] = {}
 MEMORY_QUEUE: deque[dict[str, Any]] = deque()
+DATA_DIR = os.getenv("DICOM_DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
+OUTPUT_PATH = os.getenv("DICOM_OUTPUT_PATH", os.path.join(DATA_DIR, "processed_dicom_events.jsonl"))
+AUDIT_PATH = os.getenv("DICOM_AUDIT_PATH", os.path.join(DATA_DIR, "audit_log.jsonl"))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def append_jsonl(path: str, payload: dict[str, Any]) -> None:
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str) + "\n")
+
+
+def persist_processed_event(event: dict[str, Any], result: dict[str, Any]) -> None:
+    record = {
+        "event_id": event.get("event_id"),
+        "study_uid": event.get("study_uid"),
+        "source": event.get("source"),
+        "deidentified": result.get("deidentified"),
+        "minimized_payload": result.get("minimized_payload"),
+        "processed_at": result.get("processed_at"),
+    }
+    append_jsonl(OUTPUT_PATH, record)
+
+
+def persist_audit_log(event: dict[str, Any], result: dict[str, Any]) -> None:
+    record = {
+        "event_id": event.get("event_id"),
+        "consent_reference": event.get("consent_reference"),
+        "purpose": event.get("purpose"),
+        "source": event.get("source"),
+        "deidentified": result.get("deidentified"),
+        "processed_at": result.get("processed_at"),
+    }
+    append_jsonl(AUDIT_PATH, record)
+
+
+def get_consent_log_entries() -> dict[str, dict[str, Any]]:
+    return dict(CONSENT_LOG)
 
 
 def already_processed(event_id: str) -> bool:
@@ -210,6 +247,16 @@ def process_dicom_event(event: dict) -> dict:
             "minimized_payload": minimized_payload,
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    persist_processed_event(merged_event, {
+        "deidentified": deidentified,
+        "minimized_payload": minimized_payload,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    persist_audit_log(merged_event, {
+        "deidentified": deidentified,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    })
 
     return {
         "quality_score": 100,
