@@ -1,5 +1,5 @@
 from worker.celery_app import process_dicom_task
-from worker.worker import process_dicom_event, process_event
+from worker.worker import build_fhir_resources, process_dicom_event, process_event
 
 
 def test_celery_task_is_registered():
@@ -56,3 +56,21 @@ def test_process_dicom_event_redacts_sensitive_fields():
     assert result["deidentified"]["patient_birth_date"] == "REDACTED"
     assert result["deidentified"]["study_uid"] == "1.2.826.0.1.3680043.8.498.123456"
     assert result["indexed_fields"]["modality"] == "CT"
+    assert result["minimized_payload"]["modality"] == "CT"
+    assert "patient_name" not in result["minimized_payload"]
+
+
+def test_build_fhir_resources_returns_minimal_resources():
+    event = {
+        "study_uid": "1.2.826.0.1.3680043.8.498.123456",
+        "modality": "CT",
+        "kVp": 120,
+        "mA": 250,
+        "source": "PACS"
+    }
+
+    resources = build_fhir_resources(event)
+
+    assert resources["Patient"]["resourceType"] == "Patient"
+    assert resources["Observation"]["resourceType"] == "Observation"
+    assert resources["Observation"]["code"]["text"] == "CT acquisition metadata"

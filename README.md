@@ -3,6 +3,8 @@
 ## Overview
 This repository now demonstrates a radiology-focused healthcare ingestion pipeline for DICOM metadata. It combines FastAPI, asynchronous queue processing, and privacy-preserving data handling to show how large medical image payloads can be processed safely without blocking the web API.
 
+- Schema-first validation using Pydantic (Designed with Data Minimisation and Lawfulness under UK GDPR in mind) (Future support for FHIR Patient/Observation resource mapping)
+
 ---
 
 ## What changed
@@ -11,6 +13,7 @@ This repository now demonstrates a radiology-focused healthcare ingestion pipeli
 - Added a lightweight queue layer for DICOM events with a Redis-backed path and an in-memory fallback for local development.
 - Added a searchable index endpoint at /dicom/search for clinical metadata retrieval.
 - Added a Docker multi-stage image so the service can run consistently in local or cloud environments.
+- Added data-minimised clinical payloads and a simple FHIR-style mapping layer for future interoperability with Patient and Observation resources.
 
 ---
 
@@ -47,6 +50,7 @@ flowchart LR
 - Consent logging is enforced for DICOM intake.
 - Only diagnostic-support use is accepted by default to support purpose limitation.
 - Sensitive fields are masked before indexing or downstream processing.
+- Only the minimum clinical fields required for downstream review are retained in the minimised payload.
 - pydicom is used when DICOM bytes are provided for metadata extraction.
 
 ---

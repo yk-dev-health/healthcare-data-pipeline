@@ -47,6 +47,7 @@ except Exception:  # pragma: no cover - fallback when Redis is not running local
 
 DICOM_QUEUE_NAME = "dicom_queue"
 DICOM_INDEX: dict[str, dict[str, Any]] = {}
+CONSENT_LOG: dict[str, dict[str, Any]] = {}
 MEMORY_QUEUE: deque[dict[str, Any]] = deque()
 
 
@@ -143,6 +144,42 @@ def extract_dicom_metadata(payload: Any) -> dict[str, Any]:
     return {}
 
 
+def create_minimized_payload(event: dict) -> dict[str, Any]:
+    minimized = {
+        "study_uid": event.get("study_uid"),
+        "modality": event.get("modality"),
+        "source": event.get("source"),
+        "kVp": event.get("kVp"),
+        "mA": event.get("mA"),
+    }
+    if event.get("quality_score") is not None:
+        minimized["quality_score"] = event.get("quality_score")
+    return {key: value for key, value in minimized.items() if value is not None}
+
+
+def build_fhir_resources(event: dict) -> dict[str, dict[str, Any]]:
+    study_uid = event.get("study_uid") or "unknown-study"
+    patient_id = f"anon-{study_uid.split('.')[-1]}"
+    return {
+        "Patient": {
+            "resourceType": "Patient",
+            "id": patient_id,
+            "identifier": [{"system": "urn:study-uid", "value": study_uid}],
+            "meta": {"tag": [{"system": "urn:privacy", "code": "deidentified"}]},
+        },
+        "Observation": {
+            "resourceType": "Observation",
+            "id": f"obs-{patient_id}",
+            "status": "final",
+            "code": {
+                "coding": [{"system": "urn:dicom", "code": "modality"}],
+                "text": f"{event.get('modality', 'UNK')} acquisition metadata",
+            },
+            "valueString": f"source={event.get('source', 'unknown')}|kVp={event.get('kVp')}|mA={event.get('mA')}",
+        },
+    }
+
+
 def process_dicom_event(event: dict) -> dict:
     metadata = extract_dicom_metadata(event.get("dicom_bytes"))
     merged_event = {**metadata, **event}
@@ -163,10 +200,14 @@ def process_dicom_event(event: dict) -> dict:
         "study_uid": merged_event.get("study_uid"),
     }
 
+    minimized_payload = create_minimized_payload(merged_event)
+    fhir_resources = build_fhir_resources(merged_event)
+
     if merged_event.get("study_uid"):
         DICOM_INDEX[merged_event["study_uid"]] = {
             "deidentified": deidentified,
             "indexed_fields": indexed_fields,
+            "minimized_payload": minimized_payload,
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -175,6 +216,8 @@ def process_dicom_event(event: dict) -> dict:
         "issues": [],
         "deidentified": deidentified,
         "indexed_fields": indexed_fields,
+        "minimized_payload": minimized_payload,
+        "fhir_resources": fhir_resources,
         "processed_at": datetime.now(timezone.utc).isoformat(),
     }
 

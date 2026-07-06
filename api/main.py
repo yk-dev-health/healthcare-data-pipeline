@@ -10,9 +10,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from api.pubsub_client import publish_event
 from worker.celery_app import process_dicom_task
-from worker.worker import enqueue_dicom_event, get_dicom_search_results
+from worker.worker import enqueue_dicom_event, get_dicom_search_results, process_dicom_event
 
 app = FastAPI(title="Healthcare Data Pipeline", version="0.2.0")
+CONSENT_LOG: dict[str, dict[str, str | bool]] = {}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +75,16 @@ class DicomIngestionPayload(BaseModel):
         if v is not None and v <= 0:
             raise ValueError("technical values must be > 0")
         return v
+
+
+def register_consent_log(payload: dict) -> str:
+    consent_reference = f"consent-{uuid.uuid4().hex[:8]}"
+    CONSENT_LOG[consent_reference] = {
+        "purpose": payload.get("purpose", "diagnostic_support"),
+        "source": payload.get("source", "PACS"),
+        "consent_logged": bool(payload.get("consent_logged", False)),
+    }
+    return consent_reference
 
 
 @app.middleware("http")
@@ -142,12 +153,17 @@ async def receive_dicom_event(payload: DicomIngestionPayload):
         "source": payload.source,
     }
 
+    consent_reference = register_consent_log(payload.model_dump(mode="json"))
+
     event_dict = payload.model_dump(mode="json")
     event_dict["event_id"] = str(uuid.uuid4())
     event_dict["received_at"] = datetime.utcnow().isoformat() + "Z"
     event_dict["deidentified"] = deidentified
+    event_dict["consent_reference"] = consent_reference
 
     publish_event(event_dict)
+
+    processing_result = process_dicom_event(event_dict)
 
     try:
         celery_result = process_dicom_task.apply_async(args=[event_dict])
@@ -160,7 +176,9 @@ async def receive_dicom_event(payload: DicomIngestionPayload):
         "status": "queued",
         "event_id": event_dict["event_id"],
         "deidentified": deidentified,
+        "consent_reference": consent_reference,
         "queue": queue_status,
+        "processing": processing_result,
     }
 
 
