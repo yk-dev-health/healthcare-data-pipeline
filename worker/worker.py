@@ -9,6 +9,15 @@ from typing import Any
 import redis
 from dotenv import load_dotenv
 
+from worker.data_minimization import (
+    PatientPseudonymizer,
+    create_minimized_payload,
+    create_pii_shadow_record,
+    remove_pii_from_dicom_metadata,
+    store_sensitive_data_with_ttl,
+)
+from worker.logger import audit_logger
+
 try:
     from google.cloud import pubsub_v1
 except Exception:  # pragma: no cover - fallback for local environments
@@ -181,19 +190,6 @@ def extract_dicom_metadata(payload: Any) -> dict[str, Any]:
     return {}
 
 
-def create_minimized_payload(event: dict) -> dict[str, Any]:
-    minimized = {
-        "study_uid": event.get("study_uid"),
-        "modality": event.get("modality"),
-        "source": event.get("source"),
-        "kVp": event.get("kVp"),
-        "mA": event.get("mA"),
-    }
-    if event.get("quality_score") is not None:
-        minimized["quality_score"] = event.get("quality_score")
-    return {key: value for key, value in minimized.items() if value is not None}
-
-
 def build_fhir_resources(event: dict) -> dict[str, dict[str, Any]]:
     study_uid = event.get("study_uid") or "unknown-study"
     patient_id = f"anon-{study_uid.split('.')[-1]}"
@@ -218,8 +214,60 @@ def build_fhir_resources(event: dict) -> dict[str, dict[str, Any]]:
 
 
 def process_dicom_event(event: dict) -> dict:
+    """
+    Process DICOM event with GDPR compliance:
+    - Principle 3: Data Minimization (remove unnecessary PII)
+    - Principle 5: Storage Limitation (TTL management)
+    - Principle 7: Accountability (structured audit logging)
+    """
+    event_id = event.get("event_id") or str(uuid.uuid4())
+    patient_id = event.get("patient_id")
+    patient_name = event.get("patient_name")
+    patient_birth_date = event.get("patient_birth_date")
+    study_uid = event.get("study_uid")
+    modality = event.get("modality")
+    source = event.get("source", "PACS")
+    purpose = event.get("purpose", "diagnostic_support")
+    consent_logged = event.get("consent_logged", False)
+
+    # Initialize pseudonymizer for audit linkage
+    pseudonymizer = PatientPseudonymizer()
+    pseudonym_id = pseudonymizer.pseudonymize_patient_id(patient_id) if patient_id else "PS_unknown"
+
+    # Log data ingestion (GDPR Article 13/14: Transparency)
+    audit_logger.log_data_ingestion(
+        event_id=event_id,
+        patient_id=pseudonym_id,
+        study_uid=study_uid,
+        modality=modality,
+        source=source,
+        purpose=purpose,
+        metadata={"consent_logged": consent_logged},
+    )
+
+    # Extract DICOM metadata if provided as bytes
     metadata = extract_dicom_metadata(event.get("dicom_bytes"))
     merged_event = {**metadata, **event}
+
+    # Principle 3: Remove unnecessary PII
+    pii_removed_fields = []
+    if patient_name:
+        pii_removed_fields.append("patient_name")
+    if patient_birth_date:
+        pii_removed_fields.append("patient_birth_date")
+
+    # Create de-identified payload
+    dicom_dict_for_minimization = {
+        "patient_name": merged_event.get("patient_name"),
+        "patient_birth_date": merged_event.get("patient_birth_date"),
+        "patient_id": merged_event.get("patient_id"),
+        "study_uid": merged_event.get("study_uid"),
+        "modality": merged_event.get("modality"),
+        "study_date": merged_event.get("study_date"),
+        "institution_name": merged_event.get("institution_name"),
+        "referring_physician_name": merged_event.get("referring_physician_name"),
+    }
+    minimized_metadata = remove_pii_from_dicom_metadata(dicom_dict_for_minimization)
 
     deidentified = {
         "patient_name": "REDACTED" if merged_event.get("patient_name") else None,
@@ -231,13 +279,62 @@ def process_dicom_event(event: dict) -> dict:
         "source": merged_event.get("source"),
     }
 
+    # Log de-identification (Principle 3: Minimization)
+    audit_logger.log_data_deidentification(
+        event_id=event_id,
+        patient_id=pseudonym_id,
+        pseudonym_id=pseudonym_id,
+        fields_removed=pii_removed_fields,
+        purpose="gdpr_principle_3_minimization",
+    )
+
+    # Principle 5: Storage Limitation
+    # Create shadow record for audit linkage (90-day retention)
+    shadow_record = create_pii_shadow_record(
+        patient_id=patient_id,
+        patient_name=patient_name,
+        patient_birth_date=patient_birth_date,
+        study_uid=study_uid,
+        event_id=event_id,
+        pseudonymizer=pseudonymizer,
+    )
+
+    # Store sensitive data with TTL (1-hour for processing)
+    if patient_id and patient_name:
+        store_sensitive_data_with_ttl(
+            key=f"sensitive:patient:{event_id}",
+            value={"patient_id": patient_id, "patient_name": patient_name},
+            ttl_seconds=3600,  # 1 hour for processing
+            purpose="processing",
+        )
+
+    # Log retention policy (Principle 5: Storage Limitation)
+    audit_logger.log_data_retention(
+        event_id=event_id,
+        study_uid=study_uid,
+        storage_location="redis_ttl_store",
+        ttl_seconds=3600,
+        retention_policy="automatic_deletion_after_processing",
+    )
+
+    # Log consent record (GDPR Article 7: Consent)
+    if consent_logged:
+        audit_logger.log_consent_record(
+            event_id=event_id,
+            patient_id=pseudonym_id,
+            consent_type="explicit_consent",
+            consent_logged=True,
+            consent_reference=event.get("consent_reference"),
+            purposes=[purpose],
+        )
+
     indexed_fields = {
         "modality": merged_event.get("modality"),
         "source": merged_event.get("source"),
         "study_uid": merged_event.get("study_uid"),
     }
 
-    minimized_payload = create_minimized_payload(merged_event)
+    minimized_payload = create_minimized_payload(merged_event, pseudonym_id)
     fhir_resources = build_fhir_resources(merged_event)
 
     if merged_event.get("study_uid"):
@@ -258,9 +355,20 @@ def process_dicom_event(event: dict) -> dict:
         "processed_at": datetime.now(timezone.utc).isoformat(),
     })
 
+    # Log data access for audit trail
+    audit_logger.log_data_access(
+        event_id=event_id,
+        pseudonym_id=pseudonym_id,
+        accessor="worker.process_dicom_event",
+        access_type="READ_PROCESS",
+        purpose="medical_imaging_analysis",
+        result="success",
+    )
+
     return {
         "quality_score": 100,
         "issues": [],
+        "event_id": event_id,
         "deidentified": deidentified,
         "indexed_fields": indexed_fields,
         "minimized_payload": minimized_payload,

@@ -17,6 +17,12 @@ pydicom==3.0.1
 google-cloud-pubsub==2.26.0
 
 # -----------------------------
+# Google Cloud BigQuery (GDPR Principle 5: Storage Limitation)
+# Automatic partition expiration for data retention policies
+# -----------------------------
+google-cloud-bigquery==3.17.0
+
+# -----------------------------
 # Task queue
 # -----------------------------
 celery>=5.4.7,<6
@@ -25,6 +31,11 @@ celery>=5.4.7,<6
 # Redis (for idempotency)
 # -----------------------------
 redis==5.0.7
+
+# -----------------------------
+# Structured logging (GDPR compliance - Principle 7: Accountability)
+# -----------------------------
+structlog==24.4.0
 
 # -----------------------------
 # Logging / utilities (optional but common in production)

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from api.pubsub_client import publish_event
 from worker.celery_app import process_dicom_task
+from worker.logger import audit_logger
 from worker.worker import enqueue_dicom_event, get_consent_log_entries, get_dicom_search_results, process_dicom_event
 
 app = FastAPI(title="Healthcare Data Pipeline", version="0.2.0")
@@ -146,7 +147,15 @@ async def receive_event(event: Event):
 async def receive_dicom_event(payload: DicomIngestionPayload):
     """Accept DICOM metadata, anonymize it, and queue it for background processing."""
 
+    event_id = str(uuid.uuid4())
+
     if payload.purpose != "diagnostic_support":
+        audit_logger.log_breach_notification(
+            breach_id=event_id,
+            affected_patients=1,
+            breach_type="purpose_limitation_violation",
+            description=f"Attempted ingestion with purpose: {payload.purpose}",
+        )
         return JSONResponse(
             status_code=403,
             content={"status": "rejected", "detail": "Purpose limitation violated"},
@@ -164,8 +173,19 @@ async def receive_dicom_event(payload: DicomIngestionPayload):
 
     consent_reference = register_consent_log(payload.model_dump(mode="json"))
 
+    # Log consent record via audit_logger
+    if payload.consent_logged:
+        audit_logger.log_consent_record(
+            event_id=event_id,
+            patient_id=payload.study_uid,  # Using study_uid as pseudonym
+            consent_type="explicit_consent",
+            consent_logged=True,
+            consent_reference=consent_reference,
+            purposes=[payload.purpose],
+        )
+
     event_dict = payload.model_dump(mode="json")
-    event_dict["event_id"] = str(uuid.uuid4())
+    event_dict["event_id"] = event_id
     event_dict["received_at"] = datetime.utcnow().isoformat() + "Z"
     event_dict["deidentified"] = deidentified
     event_dict["consent_reference"] = consent_reference
