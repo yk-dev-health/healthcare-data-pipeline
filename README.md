@@ -1,112 +1,10 @@
-# Healthcare Data Pipeline
+# Healthcare Data Ingestion Pipeline (UK GDPR Compliant by Design)
 
-## Overview
-This repository demonstrates a **GDPR-compliant** radiology-focused healthcare ingestion pipeline for DICOM metadata. It combines FastAPI, asynchronous queue processing, and privacy-preserving data handling to show how large medical image payloads can be processed safely without blocking the web API.
+An enterprise-grade, asynchronous data pipeline built with **FastAPI**, **Celery**, **Redis**, and **Google BigQuery**, specifically architected for processing medical imaging metadata (DICOM) under strict regulatory compliance frameworks, including **UK GDPR** and **HIPAA**.
 
-**Key principles implemented:**
-- **Principle 3: Data Minimization** - Automatic removal of unnecessary PII from DICOM metadata
-- **Principle 5: Storage Limitation** - Redis TTL-based automatic data retention and deletion policies  
-- **Principle 7: Accountability** - Structured JSON audit logging via `structlog` for regulatory compliance
+## Core Architecture Overview
 
-- Schema-first validation using Pydantic (Designed with Data Minimisation and Lawfulness under UK GDPR in mind)
-- Future support for FHIR Patient/Observation resource mapping
-
----
-
-## What's implemented
-
-### GDPR Compliance Features
-
-#### Principle 3: Data Minimization (`worker/data_minimization.py`)
-- **Automatic PII removal**: `pydicom`-based extraction and removal of unnecessary patient identifiers
-- **Pseudonymization**: Irreversible SHA-256 hashing for audit linkage without re-identification risk
-- **Example**: Removes `PatientName`, `PatientBirthDate`, `InstitutionName` while retaining medically necessary fields like `StudyUID`, `Modality`
-
-```python
-from worker.data_minimization import remove_pii_from_dicom_metadata, PatientPseudonymizer
-
-# Remove unnecessary PII
-minimized = remove_pii_from_dicom_metadata(dicom_dict)
-
-# Create pseudonym for audit trail
-pseudonymizer = PatientPseudonymizer()
-pseudonym_id = pseudonymizer.pseudonymize_patient_id("P12345")
-```
-
-#### Principle 5: Storage Limitation (`worker/data_minimization.py`)
-- **TTL-based retention**: Redis `SETEX` with configurable time-to-live
-  - Sensitive data: **1 hour** (processing window)
-  - Shadow audit records: **90 days** (regulatory retention)
-  - Processed events: **7 days** (analytics window)
-
-```python
-from worker.data_minimization import store_sensitive_data_with_ttl, SENSITIVE_DATA_TTL
-
-# Auto-expires sensitive data after 1 hour
-store_sensitive_data_with_ttl(
-    key=f"sensitive:patient:{event_id}",
-    value={"patient_id": "P123", "patient_name": "John Doe"},
-    ttl_seconds=3600,  # 1 hour
-    purpose="processing"
-)
-```
-
-#### Principle 7: Accountability (`worker/logger.py`)
-- **Structured JSON audit trails** via `structlog`  
-- **Audit log JSONL format** for easy ingestion into SIEM/compliance tools
-- **Event types logged**:
-  - `data_ingestion`: When data enters the pipeline
-  - `data_deidentification`: When PII is removed (Principle 3)
-  - `data_retention_policy`: When TTL is configured (Principle 5)
-  - `consent_management`: When consent is recorded (GDPR Article 7)
-  - `data_access`: When data is accessed/processed
-  - `data_deletion`: When data is automatically deleted
-  - `security_breach`: For incident reporting (GDPR Article 33)
-
-```python
-from worker.logger import audit_logger
-
-# Structured audit logging
-audit_logger.log_data_deidentification(
-    event_id="evt-123",
-    patient_id="P123",
-    pseudonym_id="PS_a1b2c3d4",
-    fields_removed=["patient_name", "patient_birth_date"],
-    purpose="gdpr_principle_3_minimization"
-)
-
-# Audit trail written to /data/logs/audit_trail.jsonl
-# Example log entry:
-# {
-#   "event_type": "data_deidentification",
-#   "event_id": "evt-123",
-#   "fields_removed": ["patient_name", "patient_birth_date"],
-#   "field_count": 2,
-#   "purpose": "gdpr_principle_3_minimization",
-#   "principle": "minimization_principle_3",
-#   "timestamp": "2024-01-15T10:30:45.123Z"
-# }
-```
-
----
-
-## What changed
-- Added GDPR Principle 3 (Data Minimization): Automatic PII removal using `pydicom`
-- Added GDPR Principle 5 (Storage Limitation): Redis TTL management for all data categories
-- Added GDPR Principle 7 (Accountability): `structlog`-based JSON audit logging
-- Implemented `PatientPseudonymizer` for irreversible patient linkage in audit trails
-- Implemented shadow record storage for re-identification during data subject access requests
-- Extended `/dicom/events` endpoint with consent logging and audit trail integration
-- Added FastAPI endpoint for DICOM metadata ingestion at /dicom/events
-- Implemented automatic de-identification of patient name and birth date before storage
-- Added a lightweight queue layer for DICOM events with Redis and in-memory fallback
-- Added a searchable index endpoint at /dicom/search for clinical metadata retrieval
-- Added a Docker multi-stage image for consistent deployment
-- Added data-minimised clinical payloads and FHIR-style mapping layer
-
----
-
-## Architecture
+The system captures clinical diagnostic events, segregates sensitive clinical metadata from patient-identifiable identifiers immediately upon arrival, and utilizes an asynchronous task worker network to ensure low latency and total fault tolerance.
 
 ```mermaid
 graph TB
@@ -116,71 +14,151 @@ graph TB
     end
 
     subgraph "Processing (Principle 3 + 5 + 7)"
-        Queue["Redis Queue<br/>TTL: Auto-expiry"]
-        Worker["Worker<br/>process_dicom_event"]
+        Queue["Redis Queue<br/>Asynchronous Task"]
+        Worker["Celery Worker<br/>process_dicom_event"]
         Worker -->|Remove PII| MinData["Minimized<br/>Payload"]
         Worker -->|Create Pseudonym| Shadow["Shadow Record<br/>TTL: 90d"]
         Worker -->|Audit Log| Audit["audit_trail.jsonl<br/>structlog JSON"]
     end
 
     subgraph "Storage (Principle 5: Retention)"
-        Redis["Redis<br/>- Sensitive: 1h<br/>- Processed: 7d<br/>- Audit: 90d"]
+        Redis["Redis Cache<br/>- Sensitive: 1h<br/>- Processed: 7d"]
         Index["Search Index<br/>(Deidentified)"]
-        File["JSONL Output<br/>(Minimized)"]
+        File["JSONL Output<br/>(Minimized Audit)"]
+        BQ["Google BigQuery<br/>- Analytical Events: 90d<br/>- Compliance Logs: 7y"]
     end
 
     Consent -->|Enqueue| Queue
     Queue -->|Process| Worker
     MinData --> Index
-    MinData --> File
+    MinData --> BQ
     Shadow --> Redis
     Audit -->|Store| File
+
 ```
 
 ---
 
-## Running the pipeline
+## UK GDPR Compliance Mapping (Compliance-as-Code)
 
-### 1. Install dependencies
+This platform explicitly treats regulatory requirements as non-functional architectural constraints. Below is the direct structural mapping between **UK GDPR Article 5 Principles** and this codebase:
+
+### 1. Data Minimisation (Principle 3)
+
+* **Requirement:** Personal data must be adequate, relevant, and limited to what is necessary for the purposes for which they are processed.
+* **Code Implementation:**
+* `worker/data_minimization.py` (`remove_pii_from_dicom_metadata`): Automatically strips high-risk patient fields (`PatientName`, `PatientBirthDate`, `InstitutionName`, `ReferringPhysicianName`) from the active processing stream.
+* `worker/data_minimization.py` (`PatientPseudonymizer`): Utilizes salt-based, deterministic HMAC-SHA256 cryptographic hashes to generate irreversible pseudo-IDs (`PS_` and `PN_` prefixes) for operational mapping without persisting cleartext IDs.
+
+
+
+### 2. Accuracy (Principle 4)
+
+* **Requirement:** Personal data must be accurate and, where necessary, kept up to date; every reasonable step must be taken to ensure inaccurate data is erased or rectified.
+* **Code Implementation:**
+* `worker/worker.py` (`process_event`): Enforces clinical data validation rules (e.g., verifying realistic `slice_thickness`, discarding future-dated `study_date`, and checking formatting protocols) before generating internal clinical quality metrics.
+
+
+
+### 3. Storage Limitation (Principle 5)
+
+* **Requirement:** Data must be kept in a form which permits identification of data subjects for no longer than is necessary.
+* **Code Implementation:**
+* `worker/data_minimization.py` (`store_sensitive_data_with_ttl`): Leverages Redis `SETEX` commands to hardcode an ephemeral **1-hour Time-To-Live (TTL)** (`ex=3600`) on raw input states during the processing lifecycle.
+* `worker/bigquery_integration.py` (`BigQueryDataWarehouse`): Configures automated Google BigQuery Table Partitioning (`PARTITION BY DATE(created_at)`) bound to a rigorous **90-day expiration policy** (`partition_expiration_days=90`) for core transactional logs, automatically wiping historical clinical data.
+
+
+
+### 4. Integrity and Confidentiality (Principle 6)
+
+* **Requirement:** Processed in a manner that ensures appropriate security of the personal data, including protection against unauthorised or unlawful processing.
+* **Code Implementation:**
+* `worker/bigquery_integration.py` (`_ensure_dataset_and_tables_exist`): Enforces localized regional boundaries by locking the data warehouse location specifically to the **"EU" region** to isolate residency data outside foreign multi-region grids.
+
+
+
+### 5. Accountability (Principle 7)
+
+* **Requirement:** The controller shall be responsible for, and be able to demonstrate compliance with, the core principles.
+* **Code Implementation:**
+* `worker/logger.py` (`StructuredLogger`): Fully configures `structlog` serialization utilizing `JSONRenderer` to route immutable, machine-readable audit streams to `stdout` for SIEM ingestors. It tracks data state transitions across lifecycle hooks (`log_data_ingestion`, `log_data_deidentification`, `log_consent_record`, and `log_breach_notification`).
+
+
+
+---
+
+## Tech Stack & Core Libraries
+
+* **Framework:** FastAPI (Python 3.12)
+* **Task Worker:** Celery 5.4+ distributed framework
+* **Caching & In-Memory Storage:** Redis 7.0+
+* **Data Warehouse Engine:** Google Cloud BigQuery Client Wrapper
+* **Clinical Processing:** pydicom (Healthcare Imaging Metadata Extractor)
+* **Structured Auditing:** structlog (JSON Structured Audit trail provider)
+
+---
+
+## Local Environment Quickstart
+
+### 1. Installation & Environment Configuration
+
+Clone the repository and install all required clinical and architectural dependencies inside a virtual environment:
+
 ```bash
 pip install -r requirements.txt
+cp .env.example .env
+
 ```
 
-### 2. Set environment variables
-```bash
-export PROJECT_ID=healthcare-pipeline-yk-01
-export REDIS_HOST=localhost
-export REDIS_PORT=6379
-export LOG_LEVEL=INFO
-export PATIENT_HASH_SALT=your-production-salt-here
-export SENSITIVE_DATA_TTL=3600          # 1 hour
-export PROCESSED_EVENT_TTL=604800       # 7 days
-export AUDIT_LOG_TTL=7776000            # 90 days
+Ensure your local `.env` contains the required encryption seeds and infrastructure keys:
+
+```ini
+PROJECT_ID=healthcare-pipeline-yk-01
+REDIS_URL=redis://localhost:6379/0
+SENSITIVE_DATA_TTL=3600
+BQ_RETENTION_EVENTS_DAYS=90
+APP_SECRET_SALT=your_secure_cryptographic_salt_here
+
 ```
 
-### 3. Start services locally
+### 2. Multi-Terminal Cluster Setup
 
-**Terminal 1: Redis**
+**Terminal 1: Start Redis Instance**
+
 ```bash
 redis-server
+
 ```
 
-**Terminal 2: Celery Worker**
+**Terminal 2: Start Asynchronous Celery Worker Network**
+
 ```bash
 celery -A worker.celery_app.celery_app worker --loglevel=info
+
 ```
 
-**Terminal 3: FastAPI**
+**Terminal 3: Launch FastAPI Ingestion Gateway**
+
 ```bash
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+
 ```
 
-**Terminal 4: Background Worker (optional)**
+---
+
+## Verification & Testing Strategy
+
+The repository maintains strict enforcement of compliance via comprehensive integration and unit tests covering regulatory edge cases:
+
 ```bash
-python worker/worker.py
+# Execute full suite including validation tests
+python -m pytest -v
+
 ```
 
-### 4. Test the API
+### Ingestion Validation Scenario
+
+To simulate a standard PACS ingestion payload with clinical data and explicit consent flags, run the following transaction:
 
 ```bash
 curl -X POST http://localhost:8000/dicom/events \
@@ -196,42 +174,24 @@ curl -X POST http://localhost:8000/dicom/events \
     "source": "PACS",
     "purpose": "diagnostic_support"
   }'
+
 ```
 
-### 5. View audit logs
+### Validating SIEM-ready Audit Output
+
+Inspect the local output stream to verify structural JSON logging output:
 
 ```bash
-tail -f data/logs/audit_trail.jsonl | jq .
-```
+cat data/logs/audit_trail.jsonl
 
-### Docker
-
-```bash
-docker build -t healthcare-data-pipeline .
-docker run -p 8000:8000 \
-  -e REDIS_HOST=host.docker.internal \
-  -e PROJECT_ID=healthcare-pipeline-yk-01 \
-  healthcare-data-pipeline
-```
-
-### Tests
-
-```bash
-python -m pytest
-```
-```
-
-### Push changes
-
-```bash
-git add .
-git commit -m "<message>"
-git push origin main
 ```
 
 ---
 
-## API endpoints
-- POST /events for basic clinical metadata ingestion
-- POST /dicom/events for anonymized DICOM metadata ingestion
-- GET /dicom/search?study_uid=... for indexed result lookup
+## Production Readiness Roadmap
+
+To transition this system into a multi-region live environment, the following infrastructure enhancements are scheduled:
+
+1. **Cloud KMS Integration:** Moving the local `APP_SECRET_SALT` to dynamic hardware security modules (HSM) using Google Cloud Key Management Service.
+2. **On-Demand GDPR Art. 17 Endpoints:** Introducing distributed worker purging hooks to wipe matching cryptographic `pseudonym_id` blocks upon immediate consumer request.
+3. **Task-Level Dead Letter Queues (DLQ):** Enforcing explicit isolation routing on tasks encountering persistent downstream database exceptions.
