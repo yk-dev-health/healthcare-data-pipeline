@@ -97,6 +97,17 @@ __all__ = ["app", "Event", "ClinicalEvent", "DicomIngestionPayload"]
 
 
 def require_role(role: str):
+    """Placeholder for the authentication layer. **Not a security control.**
+
+    This trusts an unverified ``x-role`` header, so anyone can send
+    ``x-role: admin``. It exists to mark where authentication attaches and to
+    carry the audit logging that belongs with an access decision.
+
+    In deployment the service sits behind an API Gateway / IAP that
+    authenticates the caller and injects a verified identity; this function is
+    the seam where that identity would be read instead of the raw header.
+    """
+
     def _checker(request: Request):
         if request.headers.get("x-role", "").lower() != role:
             # Log the refusal, not just the grant. An access-control decision

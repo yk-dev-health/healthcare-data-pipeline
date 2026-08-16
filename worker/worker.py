@@ -62,8 +62,17 @@ DICOM_QUEUE_NAME = "dicom_queue"
 #: UK GDPR Art. 5(1)(b): anything outside this set is a purpose-limitation
 #: breach and must be refused, not merely logged.
 APPROVED_PURPOSES = frozenset({"diagnostic_support"})
+# Single-instance read models. These back `/dicom/search` and
+# `/admin/consent-log` and are the one part of the system that does not survive
+# a restart or a second replica; moving them to Redis (index) and BigQuery
+# (durable record) is the first change required to scale out. The *processing*
+# path has no such constraint - idempotency, quarantine and the audit trail are
+# all external - so correctness under multiple workers is already handled.
 DICOM_INDEX: dict[str, dict[str, Any]] = {}
 CONSENT_LOG: dict[str, dict[str, Any]] = {}
+#: Development-only fallback when both Celery and Redis are unreachable. Work
+#: parked here is lost on restart, which is why enqueue_dicom_event reports
+#: `durable: false` to the caller rather than hiding the downgrade.
 MEMORY_QUEUE: deque[dict[str, Any]] = deque()
 DATA_DIR = os.getenv("DICOM_DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
 OUTPUT_PATH = os.getenv("DICOM_OUTPUT_PATH", os.path.join(DATA_DIR, "processed_dicom_events.jsonl"))
@@ -343,14 +352,15 @@ def process_dicom_event(event: dict) -> dict:
     metadata = extract_dicom_metadata(event.get("dicom_bytes"))
     merged_event = {**metadata, **event}
 
-    # Principle 3: Remove unnecessary PII
-    pii_removed_fields = []
-    if patient_name:
-        pii_removed_fields.append("patient_name")
-    if patient_birth_date:
-        pii_removed_fields.append("patient_birth_date")
-
-    # Create de-identified payload
+    # Principle 3: Remove unnecessary PII.
+    #
+    # The removed-field list is derived from what the minimiser actually
+    # stripped, not hand-written. It used to be a two-line if-chain covering
+    # patient_name and patient_birth_date while remove_pii_from_dicom_metadata
+    # strips up to twelve tags, so the audit record under-reported the
+    # de-identification it was supposed to evidence — and the minimiser's own
+    # result was discarded. Evidence that drifts from the operation it
+    # describes is worse than no evidence, because it is trusted.
     dicom_dict_for_minimization = {
         "patient_name": merged_event.get("patient_name"),
         "patient_birth_date": merged_event.get("patient_birth_date"),
@@ -361,7 +371,11 @@ def process_dicom_event(event: dict) -> dict:
         "institution_name": merged_event.get("institution_name"),
         "referring_physician_name": merged_event.get("referring_physician_name"),
     }
+    present_fields = {
+        key for key, value in dicom_dict_for_minimization.items() if value is not None
+    }
     minimized_metadata = remove_pii_from_dicom_metadata(dicom_dict_for_minimization)
+    pii_removed_fields = sorted(present_fields - set(minimized_metadata))
 
     deidentified = {
         "patient_name": "REDACTED" if merged_event.get("patient_name") else None,
@@ -384,7 +398,9 @@ def process_dicom_event(event: dict) -> dict:
 
     # Principle 5: Storage Limitation
     # Create shadow record for audit linkage (90-day retention)
-    shadow_record = create_pii_shadow_record(
+    # Called for its side effect: the linkage record is written to Redis under
+    # a 90-day TTL. Nothing in the processing path may hold it in memory.
+    create_pii_shadow_record(
         patient_id=patient_id,
         patient_name=patient_name,
         patient_birth_date=patient_birth_date,

@@ -225,3 +225,85 @@ class TestRouteEvent:
 
         assert result["issues"], "quality problems must be reported"
         assert result["quality_score"] < 100
+
+
+class TestDeidentificationEvidence:
+    """The audit record must describe what actually happened.
+
+    `fields_removed` used to be a hand-written two-item list covering only
+    patient_name and patient_birth_date, while remove_pii_from_dicom_metadata
+    strips up to twelve DICOM tags. Under Art. 5(2) the audit trail is the
+    evidence that minimisation occurred, so evidence that under-reports the
+    operation is worse than none: it is trusted.
+    """
+
+    def _deident_record(self, tmp_path, monkeypatch, event):
+        import json
+
+        import worker.logger as logger_module
+
+        monkeypatch.setattr(logger_module, "AUDIT_LOG_DIR", str(tmp_path))
+        process_dicom_event(event)
+
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "audit_trail.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return next(e for e in entries if e["event_type"] == "data_deidentification")
+
+    def test_every_stripped_field_is_reported(self, tmp_path, monkeypatch):
+        record = self._deident_record(
+            tmp_path,
+            monkeypatch,
+            {
+                "study_uid": "1.2.826.0.1.3680043.8.498.777",
+                "modality": "CT",
+                "consent_logged": True,
+                "patient_name": "Jane Doe",
+                "patient_birth_date": "1985-05-17",
+                "patient_id": "P999",
+                "institution_name": "Acme Hospital",
+                "referring_physician_name": "Dr Smith",
+            },
+        )
+
+        assert set(record["fields_removed"]) == {
+            "patient_name",
+            "patient_birth_date",
+            "institution_name",
+            "referring_physician_name",
+        }
+        assert record["field_count"] == 4
+
+    def test_absent_fields_are_not_claimed_as_removed(self, tmp_path, monkeypatch):
+        """Over-reporting is the mirror-image failure and equally misleading."""
+        record = self._deident_record(
+            tmp_path,
+            monkeypatch,
+            {
+                "study_uid": "1.2.826.0.1.3680043.8.498.778",
+                "modality": "CT",
+                "consent_logged": True,
+                "patient_name": "Jane Doe",
+            },
+        )
+
+        assert record["fields_removed"] == ["patient_name"]
+
+    def test_medically_necessary_fields_are_retained(self, tmp_path, monkeypatch):
+        record = self._deident_record(
+            tmp_path,
+            monkeypatch,
+            {
+                "study_uid": "1.2.826.0.1.3680043.8.498.779",
+                "modality": "CT",
+                "consent_logged": True,
+                "patient_id": "P999",
+                "patient_name": "Jane Doe",
+            },
+        )
+
+        assert "study_uid" not in record["fields_removed"]
+        assert "modality" not in record["fields_removed"]
+        assert "patient_id" not in record["fields_removed"]

@@ -230,6 +230,26 @@ gcloud beta emulators pubsub start --host-port=localhost:8085
 export PUBSUB_EMULATOR_HOST=localhost:8085   # PUBSUB_ENABLED flips on automatically
 ```
 
+### Two boundaries drawn on purpose
+
+**Authentication is not implemented, by design.** `require_role` compares an
+`x-role` request header and is a *placeholder*, not a security control — the
+header is unverified, so anyone can send `x-role: admin`. In deployment this
+service sits behind an API Gateway or IAP that authenticates the caller and
+injects a verified identity; `require_role` marks that attachment point and the
+audit logging that belongs with it. Rolling a bespoke auth scheme into a
+pipeline project would be the wrong thing to demonstrate, and a weak version of
+it is worse than an explicit gap.
+
+**State is single-instance.** `DICOM_INDEX` and `CONSENT_LOG` are in-process
+dicts, so `/dicom/search` and `/admin/consent-log` assume exactly one API
+instance and lose their contents on restart. This is the first thing that has to
+change to run more than one replica — the natural move is Redis for the index
+and BigQuery for the durable record, both of which are already dependencies.
+The processing path itself has no such constraint: idempotency, quarantine and
+the audit trail are all external, so *correctness* under multiple workers is
+already handled. It is only these two read views that are not.
+
 ## Local Environment Quickstart
 
 ### 1. Installation & Environment Configuration
