@@ -10,6 +10,8 @@ from datetime import date
 
 import pytest
 import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 from worker.data_minimization import (
     PatientPseudonymizer,
@@ -197,10 +199,19 @@ class TestStorageLimitation:
     def test_store_and_retrieve_sensitive_data(self):
         """Integration test: store and retrieve sensitive data with TTL."""
         try:
-            # Try to connect to Redis
-            r = redis.Redis(host="localhost", port=6379, db=0)
+            # Bounded connect. Without these timeouts this probe blocked for
+            # ~50 s on a host with no Redis listening, so the "skip if
+            # unavailable" guard cost almost a minute of every CI run.
+            r = redis.Redis(
+                host="localhost",
+                port=6379,
+                db=0,
+                socket_connect_timeout=0.25,
+                socket_timeout=0.25,
+                retry=Retry(NoBackoff(), retries=0),
+            )
             r.ping()
-        except (redis.ConnectionError, Exception):
+        except Exception:
             pytest.skip("Redis not available")
         
         # Store data
