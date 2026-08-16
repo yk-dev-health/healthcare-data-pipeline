@@ -8,34 +8,38 @@ This module implements:
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
-import pydicom
-import redis
 from dotenv import load_dotenv
+
+from common.config import DEFAULT_SALT, env_int, get_settings
+from common.errors import RedisUnavailableError
+from common.redis_support import get_redis_client
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+_settings = get_settings()
+
+REDIS_HOST = _settings.redis.host
+REDIS_PORT = _settings.redis.port
+REDIS_DB = _settings.redis.db
 
 # TTL settings (in seconds)
-SENSITIVE_DATA_TTL = int(os.getenv("SENSITIVE_DATA_TTL", "3600"))  # 1 hour
-PROCESSED_EVENT_TTL = int(os.getenv("PROCESSED_EVENT_TTL", "604800"))  # 7 days
-AUDIT_LOG_TTL = int(os.getenv("AUDIT_LOG_TTL", "7776000"))  # 90 days
+SENSITIVE_DATA_TTL = env_int("SENSITIVE_DATA_TTL", 3600)  # 1 hour
+PROCESSED_EVENT_TTL = env_int("PROCESSED_EVENT_TTL", 604800)  # 7 days
+AUDIT_LOG_TTL = env_int("AUDIT_LOG_TTL", 7776000)  # 90 days
 
-try:
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
-    redis_client.ping()
-except Exception:
-    redis_client = None
+# Lazily connected; constructing this performs no I/O. The previous version
+# called `.ping()` at import with no socket timeout, which blocked module
+# import for ~50 s whenever Redis was not listening.
+redis_client = get_redis_client()
 
 
 class PatientPseudonymizer:
@@ -49,39 +53,73 @@ class PatientPseudonymizer:
         Initialize pseudonymizer.
 
         Args:
-            salt: Optional salt for hashing (should be environment-managed)
-        """
-        self.salt = salt or os.getenv("PATIENT_HASH_SALT", "default-salt-change-in-production")
+            salt: Keying material. Defaults to ``PATIENT_HASH_SALT``.
 
-    def pseudonymize_patient_id(self, patient_id: str) -> str:
+        Raises:
+            ValueError: The built-in development salt is in use while
+                ``APP_ENV`` is production. A publicly-known key makes every
+                pseudonym reversible by brute force over the patient-ID space,
+                which are typically short and structured (``P00001``...), so
+                this is not a theoretical attack.
         """
-        Generate irreversible pseudonym from patient ID.
-        
+        settings = get_settings()
+        self.salt = salt or settings.patient_hash_salt
+        if settings.is_production and self.salt == DEFAULT_SALT:
+            raise ValueError(
+                "PATIENT_HASH_SALT is the built-in default; refusing to generate "
+                "reversible pseudonyms in production"
+            )
+        self._key = self.salt.encode("utf-8")
+
+    def _digest(self, value: str, prefix: str, length: int) -> str:
+        """Keyed HMAC-SHA256 digest.
+
+        HMAC rather than ``sha256(value + salt)``. A plain salted hash is
+        vulnerable to length-extension and, more practically here, offers no
+        formal guarantee once the salt is treated as a secret key. HMAC is the
+        construction that is actually designed for keyed digests, and the
+        cost is identical.
+        """
+        mac = hmac.new(self._key, value.encode("utf-8"), hashlib.sha256)
+        return f"{prefix}_{mac.hexdigest()[:length]}"
+
+    def pseudonymize_patient_id(self, patient_id: Optional[str]) -> str:
+        """
+        Generate an irreversible pseudonym from a patient ID.
+
+        Deterministic by design: the same patient must map to the same
+        pseudonym so that records can be linked for clinical audit without
+        holding the identifier.
+
+        A DICOM ingestion payload legitimately carries no ``patient_id`` — the
+        study UID is the key — so ``None`` maps to a fixed sentinel rather than
+        raising. Returning a sentinel keeps audit records well-formed; hashing
+        the empty string would instead produce a plausible-looking pseudonym
+        that silently collides across every patient-less event.
+
         Args:
-            patient_id: Original patient identifier
-            
+            patient_id: Original patient identifier, or None.
+
         Returns:
-            Hashed pseudonym (e.g., "PS_a1b2c3d4...")
+            Keyed pseudonym (e.g., "PS_a1b2c3d4...") or ``"PS_unknown"``.
         """
-        hash_input = f"{patient_id}{self.salt}".encode("utf-8")
-        hash_hex = hashlib.sha256(hash_input).hexdigest()[:16]
-        return f"PS_{hash_hex}"
+        if patient_id is None or str(patient_id).strip() == "":
+            return "PS_unknown"
+        return self._digest(str(patient_id), "PS", 16)
 
     def pseudonymize_patient_name(self, patient_name: Optional[str]) -> Optional[str]:
         """
         Generate pseudonym from patient name for audit linkage.
-        
+
         Args:
             patient_name: Original patient name (will be removed from main flow)
-            
+
         Returns:
             Hashed pseudonym or None if name is None
         """
         if patient_name is None:
             return None
-        hash_input = f"{patient_name}{self.salt}".encode("utf-8")
-        hash_hex = hashlib.sha256(hash_input).hexdigest()[:12]
-        return f"PN_{hash_hex}"
+        return self._digest(patient_name, "PN", 12)
 
 
 def remove_pii_from_dicom_metadata(dicom_metadata: dict[str, Any]) -> dict[str, Any]:
@@ -207,8 +245,11 @@ def create_pii_shadow_record(
                 json.dumps(shadow_record, default=str),
             )
             logger.info(f"Shadow record stored with {AUDIT_LOG_TTL}s TTL: {key}")
-        except Exception as e:
-            logger.error(f"Failed to store shadow record: {e}")
+        except RedisUnavailableError as e:
+            # Best-effort: losing the audit-linkage record degrades our ability
+            # to answer an Art. 15 access request, but it is not a reason to
+            # fail the clinical event, which is already de-identified.
+            logger.error("shadow_record_store_failed event_id=%s code=%s", event_id, e.code)
 
     return shadow_record
 
@@ -238,12 +279,19 @@ def store_sensitive_data_with_ttl(
         return False
 
     ttl = ttl_seconds or SENSITIVE_DATA_TTL
+    if ttl <= 0:
+        # A non-positive TTL on a SETEX is a Redis error, but more importantly
+        # an unbounded lifetime for sensitive data would silently defeat
+        # Principle 5. Refuse rather than fall back to a persistent key.
+        logger.error("refusing to store sensitive data without a positive TTL: key=%s", key)
+        return False
+
     try:
         redis_client.setex(key, ttl, json.dumps({"value": value, "purpose": purpose}, default=str))
-        logger.info(f"Sensitive data stored with {ttl}s TTL: {key}")
+        logger.info("sensitive_data_stored key=%s ttl=%ds purpose=%s", key, ttl, purpose)
         return True
-    except Exception as e:
-        logger.error(f"Failed to store sensitive data: {e}")
+    except RedisUnavailableError as e:
+        logger.error("sensitive_data_store_failed key=%s code=%s", key, e.code)
         return False
 
 
@@ -266,8 +314,8 @@ def get_sensitive_data_from_ttl_store(key: str) -> Optional[Any]:
             obj = json.loads(data)
             return obj.get("value")
         return None
-    except Exception as e:
-        logger.error(f"Failed to retrieve sensitive data: {e}")
+    except (RedisUnavailableError, json.JSONDecodeError) as e:
+        logger.error("sensitive_data_read_failed key=%s error=%s", key, type(e).__name__)
         return None
 
 
