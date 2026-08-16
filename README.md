@@ -39,6 +39,97 @@ graph TB
 
 ---
 
+## Reliability Engineering
+
+Pub/Sub delivers **at-least-once**. Duplicates and redeliveries are documented
+behaviour, not edge cases, so the consumer is built around them rather than
+around the happy path.
+
+### Delivery semantics
+
+Every failure answers one question — *should this message be redelivered?* —
+and the handler dispatches on the answer, never on the concrete exception type
+(`common/errors.py`). Getting it wrong is expensive in both directions:
+retrying a poison message pins a subscriber forever, while acking a transient
+failure destroys a clinical event.
+
+| Situation | Action | Rationale |
+|---|---|---|
+| Body is not UTF-8 / not a JSON object | **ack** | Can never parse → quarantine |
+| Payload fails schema validation | **ack** | Can never validate → quarantine |
+| Consent absent / purpose not approved | **ack** | Must not be processed at all |
+| Already completed | **ack** | Work is done; drop silently |
+| Another worker holds the lease | **nack** | Don't race it |
+| Dedup backend down (`fail_mode=closed`) | **nack** | Never process unprotected |
+| Transient processing failure | **nack** | Retry within the delivery budget |
+| Delivery budget exhausted | **ack** | Break the poison loop → quarantine |
+| Unclassified exception | **nack** | Bias to keeping data; budget bounds it |
+
+The whole matrix is unit-tested against an in-process message double
+(`tests/test_message_handler.py`), including the invariant that every delivery
+is settled **exactly once** — an unsettled message silently holds a
+flow-control slot until its ack deadline expires.
+
+### Idempotency (`common/idempotency.py`)
+
+A three-state claim protocol whose decision point is a single atomic
+`SET key value NX EX ttl`:
+
+```
+NEW  ──►  in-progress:<fencing-token>  ──►  done
+```
+
+* **ACQUIRED** — this worker owns the event.
+* **IN_FLIGHT** — another worker holds an unexpired lease → nack.
+* **DUPLICATE** — already completed → ack and drop.
+
+The lease carries a **fencing token**, so a worker that stalled past its lease
+cannot later delete or complete a claim a different worker has taken over.
+The commit happens *before* the ack: a crash in between yields a duplicate
+that dedup catches, whereas the reverse order would ack work the store has no
+record of.
+
+`IDEMPOTENCY_FAIL_MODE` makes the CAP trade-off explicit. The default,
+`closed`, refuses to process when Redis is unavailable — consistency over
+availability, because the subscription will hold the work until Redis returns,
+and a duplicate imaging record double-counts in every downstream aggregate and
+emits a second audit entry claiming a second access to a patient's data.
+
+### PHI-safe error handling (`common/schemas.py`, `api/errors.py`)
+
+Pydantic's `ValidationError.errors()` includes the **rejected input value**, and
+FastAPI's default 422 body is built from exactly that. For a DICOM endpoint,
+a mistyped date of birth is therefore echoed into the response body, the access
+log, and any error tracker in the path — a personal-data disclosure caused by a
+validation bug rather than by any line of code someone wrote.
+
+`safe_validation_errors()` returns field path, constraint type and constraint
+message with values stripped, and applies a stricter rule to identifier-bearing
+fields. The same scrubbing covers the quarantine sink, which stores a SHA-256
+digest of the rejected body instead of the body itself.
+
+### Failure isolation
+
+* **No import-time I/O.** Every client is lazily constructed with explicit
+  socket timeouts. Previously two modules pinged Redis at import with no
+  timeout, blocking module import for ~50 s each on a host without Redis.
+* **Circuit breaker** on Redis: after a failure the client stops dialling for
+  a cooldown, so an outage costs a constant per call rather than a timeout each.
+* **Fail-fast broker.** `apply_async` against an unreachable Redis measured
+  **107 s** inside the HTTP handler, mostly from the result backend opening a
+  synchronous pub/sub subscription. The result backend is removed (nothing
+  awaits a Celery result, and it persisted clinical metadata with no consumer);
+  what remains is bounded at ~2 s with an explicit fallback.
+* **Startup validation.** The API refuses to boot on unsafe configuration —
+  default pseudonymisation salt, PHI-persisting quarantine, or fail-open
+  idempotency in production.
+* **Honest status codes.** A publish failure returns `503` with `Retry-After`.
+  It previously returned **HTTP 200** with `{"status": "error"}`, so a PACS
+  reading the status code recorded studies as ingested that never reached the
+  topic — silent clinical data loss, invisible to uptime monitoring.
+
+---
+
 ## UK GDPR Compliance Mapping (Compliance-as-Code)
 
 This platform explicitly treats regulatory requirements as non-functional architectural constraints. Below is the direct structural mapping between **UK GDPR Article 5 Principles** and this codebase:
@@ -148,13 +239,33 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
 ## Verification & Testing Strategy
 
-The repository maintains strict enforcement of compliance via comprehensive integration and unit tests covering regulatory edge cases:
+190 tests covering delivery semantics, duplicate suppression, schema
+enforcement and PHI containment. The suite runs **fully offline in ~5 seconds**
+— Redis and Pub/Sub are replaced by in-process doubles in `tests/conftest.py`,
+so CI needs no service containers and no GCP credentials.
 
 ```bash
-# Execute full suite including validation tests
-python -m pytest -v
-
+python -m pytest -q
 ```
+
+Two design choices make the reliability behaviour testable at all:
+
+* **A controllable clock.** Lease expiry and circuit-breaker cooldowns are
+  time-dependent; injecting the clock tests the real behaviour in microseconds
+  rather than approximating it with `sleep`.
+* **A Redis double that fails on demand.** `FakeRedis.set_failing()` simulates
+  a mid-test outage, which is how the fail-closed idempotency path and the
+  circuit breaker are covered. These are precisely the paths that cannot be
+  triggered reliably against a live broker.
+
+| Module | Focus |
+|---|---|
+| `test_message_handler.py` | ack/nack matrix, poison messages, retry budget, exactly-once settlement |
+| `test_idempotency.py` | concurrent claims, lease expiry, fencing tokens, fail-open vs fail-closed |
+| `test_schema_validation.py` | clinical plausibility rules, PHI-free error rendering |
+| `test_api_error_handling.py` | status codes, no PHI in 4xx/5xx bodies, health probes |
+| `test_redis_resilience.py` | lazy connect, timeouts, circuit breaker, recovery without restart |
+| `test_pubsub_publisher.py` | lazy client, bounded publish, typed failures, attribute hygiene |
 
 ### Ingestion Validation Scenario
 
@@ -177,14 +288,82 @@ curl -X POST http://localhost:8000/dicom/events \
 
 ```
 
-### Validating SIEM-ready Audit Output
+### Inspecting Delivery Semantics
 
-Inspect the local output stream to verify structural JSON logging output:
+The reliability behaviour — duplicate suppression, retry budgets, quarantine —
+is invisible in a normal request trace. `scripts/inspect_delivery.py` feeds
+messages straight into the receive-path handler and prints each decision, with
+no broker required:
 
 ```bash
-cat data/logs/audit_trail.jsonl
+python scripts/inspect_delivery.py
+```
 
 ```
+Redis: UP
+scenario                    outcome                   settle reason
+------------------------------------------------------------------------
+valid event                 processed                 ACK
+SAME event redelivered      duplicate                 ACK
+malformed JSON              quarantined_invalid       ACK    message_decode_failed
+unsupported modality        quarantined_invalid       ACK    schema_validation_failed
+unapproved purpose          quarantined_invalid       ACK    purpose_limitation_violated
+downstream down (attempt 1) retry                     NACK   downstream_unavailable
+downstream down (attempt 5) quarantined_exhausted     ACK    retry_budget_exhausted
+```
+
+Run it **without** Redis to watch the fail-closed policy change the outcome of
+the same messages: every valid event is nacked with
+`idempotency_backend_unavailable` rather than processed without duplicate
+protection.
+
+```bash
+docker stop hdp-redis && python scripts/inspect_delivery.py   # fail-closed
+docker run -d --rm --name hdp-redis -p 6379:6379 redis:7-alpine
+python scripts/inspect_delivery.py                            # normal
+```
+
+### Inspecting Output Streams
+
+```bash
+# SIEM-ready structured audit trail (Principle 7)
+tail -f logs/audit_trail.jsonl
+
+# Dead-letter sink: digests and field errors, never the payload
+cat data/quarantine.jsonl | python -m json.tool
+
+# Idempotency state: lease vs completed marker, with remaining TTL
+docker exec hdp-redis redis-cli --scan --pattern 'idemp:*'
+docker exec hdp-redis redis-cli GET  'idemp:v1:dicom:<event-id>'
+docker exec hdp-redis redis-cli TTL  'idemp:v1:dicom:<event-id>'
+```
+
+### Verifying PHI Containment
+
+The rejection paths are where patient data leaks by default. Each of these
+should return a useful error with **no** value from the submitted payload:
+
+```bash
+# 422 - invalid date of birth. FastAPI's stock handler would echo it back.
+curl -s -X POST http://localhost:8000/dicom/events -H 'Content-Type: application/json' \
+  -d '{"patient_name":"John Doe","patient_birth_date":"1980-99-99",
+       "study_uid":"1.2.826.0.1.3680043.8.498.123456","modality":"CT","consent_logged":true}'
+
+# 403 - purpose limitation | 400 - malformed body | 503 - publish unavailable
+```
+
+Expected 422 body — the field and its constraint, and nothing else:
+
+```json
+{"error":"validation_failed",
+ "errors":[{"field":"patient_birth_date","type":"date_from_datetime_parsing",
+            "message":"invalid value for restricted field (constraint: date_from_datetime_parsing)"}],
+ "correlation_id":"e7ad4dca54594d6b98b5698f50bafad0"}
+```
+
+The `correlation_id` matches the `X-Request-ID` response header and appears in
+the audit trail, so an operator can reconstruct the full context from the logs
+without any of it being in the response.
 
 ---
 
@@ -192,6 +371,7 @@ cat data/logs/audit_trail.jsonl
 
 To transition this system into a multi-region live environment, the following infrastructure enhancements are scheduled:
 
-1. **Cloud KMS Integration:** Moving the local `APP_SECRET_SALT` to dynamic hardware security modules (HSM) using Google Cloud Key Management Service.
-2. **On-Demand GDPR Art. 17 Endpoints:** Introducing distributed worker purging hooks to wipe matching cryptographic `pseudonym_id` blocks upon immediate consumer request.
-3. **Task-Level Dead Letter Queues (DLQ):** Enforcing explicit isolation routing on tasks encountering persistent downstream database exceptions.
+1. **Cloud KMS Integration:** Move `PATIENT_HASH_SALT` into Google Cloud KMS / Secret Manager. The startup validator already refuses to run on the default salt in production; this closes the loop by removing the secret from the environment entirely.
+2. **On-Demand GDPR Art. 17 Endpoints:** Distributed purge hooks to wipe matching `pseudonym_id` blocks on erasure request, using the shadow records in `data_minimization.py` for linkage.
+3. **Broker-side Dead Letter Topic:** The quarantine sink is currently a local JSONL file. Attaching a Pub/Sub dead-letter topic with `maxDeliveryAttempts` matching `PUBSUB_MAX_DELIVERY_ATTEMPTS` moves it to durable, replayable storage.
+4. **Metrics export:** `PubSubMessageHandler` already emits a structured `HandlerResult` per delivery through an `on_result` hook; wiring it to Prometheus gives duplicate rate, quarantine rate and retry depth without further instrumentation.
