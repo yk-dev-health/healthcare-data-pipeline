@@ -1,6 +1,15 @@
 # Healthcare Data Ingestion Pipeline (UK GDPR Compliant by Design)
 
-An enterprise-grade, asynchronous data pipeline built with **FastAPI**, **Celery**, **Redis**, and **Google BigQuery**, specifically architected for processing medical imaging metadata (DICOM) under strict regulatory compliance frameworks, including **UK GDPR** and **HIPAA**.
+An asynchronous data pipeline built with **FastAPI**, **Celery**, **Redis** and **Google Cloud Pub/Sub**, for processing medical imaging metadata (DICOM) under **UK GDPR**.
+
+It is built around the property that makes message-driven clinical pipelines
+hard: Pub/Sub delivers **at-least-once**, so duplicates, redeliveries and poison
+messages are documented behaviour rather than edge cases. Every dependency
+outage has a stated, tested response instead of an accidental one.
+
+The whole test suite runs offline in ~6 seconds with no cloud account and no
+service containers. See [Scope](#scope-what-runs-and-where) for exactly which
+parts are exercised end to end and which are verified at the interface.
 
 ## Core Architecture Overview
 
@@ -156,7 +165,7 @@ This platform explicitly treats regulatory requirements as non-functional archit
 * **Requirement:** Data must be kept in a form which permits identification of data subjects for no longer than is necessary.
 * **Code Implementation:**
 * `worker/data_minimization.py` (`store_sensitive_data_with_ttl`): Leverages Redis `SETEX` commands to hardcode an ephemeral **1-hour Time-To-Live (TTL)** (`ex=3600`) on raw input states during the processing lifecycle.
-* `worker/bigquery_integration.py` (`BigQueryDataWarehouse`): Configures automated Google BigQuery Table Partitioning (`PARTITION BY DATE(created_at)`) bound to a rigorous **90-day expiration policy** (`partition_expiration_days=90`) for core transactional logs, automatically wiping historical clinical data.
+* `worker/bigquery_integration.py` (`BigQueryDataWarehouse`): Configures BigQuery time partitioning on `created_at` with a **90-day partition expiration**, so historical clinical data is deleted by the platform rather than by a cron job somebody has to remember to keep running. *Designed and unit-tested against a mocked client; not yet wired into the processing path — see [Scope](#scope-what-runs-and-where).*
 
 
 
@@ -164,7 +173,9 @@ This platform explicitly treats regulatory requirements as non-functional archit
 
 * **Requirement:** Processed in a manner that ensures appropriate security of the personal data, including protection against unauthorised or unlawful processing.
 * **Code Implementation:**
-* `worker/bigquery_integration.py` (`_ensure_dataset_and_tables_exist`): Enforces localized regional boundaries by locking the data warehouse location specifically to the **"EU" region** to isolate residency data outside foreign multi-region grids.
+* `worker/bigquery_integration.py` (`_ensure_dataset_and_tables_exist`): Pins the dataset location to the **EU region**, since a multi-region default would place clinical data outside the UK/EEA transfer boundary. *Same status as above: unit-tested, not yet live.*
+* `common/quarantine.py`: Failed messages are recorded as a SHA-256 digest and PHI-free field errors, never the payload — a dead-letter file has a longer and less controlled lifecycle than the processing store, so persisting rejected clinical data there would create a second uncontrolled copy.
+* `api/errors.py`, `common/schemas.py`: Validation failures are rendered without the rejected value, closing a disclosure that the framework default introduces.
 
 
 
@@ -188,6 +199,36 @@ This platform explicitly treats regulatory requirements as non-functional archit
 * **Structured Auditing:** structlog (JSON Structured Audit trail provider)
 
 ---
+
+## Scope: What Runs, and Where
+
+Being precise about this matters more than the feature list, because a reviewer
+should be able to tell which claims are backed by a test and which are backed
+by a design.
+
+| Component | Status |
+|---|---|
+| FastAPI ingestion, validation, consent/purpose gates | Runs locally, covered by tests |
+| Pub/Sub receive path (ack/nack, quarantine, retry budget) | Runs locally against an in-process message double |
+| Redis idempotency, TTL store, circuit breaker | Runs against a real Redis (`docker run redis:7-alpine`) |
+| Celery async dispatch | Runs against a real Redis broker |
+| Pub/Sub publish | **Interface only.** Unit-tested against a fake client; not exercised against live GCP |
+| BigQuery warehouse (`worker/bigquery_integration.py`) | **Standalone module.** Unit-tested with mocks; not yet wired into the processing path |
+
+Publishing is opt-in via `PUBSUB_ENABLED`, defaulting to on only when
+credentials or an emulator host are present. With it off, `publish()` returns a
+`local-<digest>` placeholder rather than silently no-op'ing, so a skipped
+publish is never mistaken for a real one. That is what lets the whole suite run
+offline — but it also means the GCP integration is verified at the seam, not
+end to end.
+
+The clean way to close that gap without a billing account is the Pub/Sub
+emulator:
+
+```bash
+gcloud beta emulators pubsub start --host-port=localhost:8085
+export PUBSUB_EMULATOR_HOST=localhost:8085   # PUBSUB_ENABLED flips on automatically
+```
 
 ## Local Environment Quickstart
 
