@@ -18,6 +18,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Dead-letter sink. Local runtime artefact, and although records are PHI-free
+# by design (SHA-256 digest, never the payload) a quarantine file is not
+# something to keep in version control.
+data/quarantine.jsonl
+
 # Environment variables
 .env
 

@@ -41,4 +41,11 @@ structlog==24.4.0
 # Logging / utilities (optional but common in production)
 # -----------------------------
 python-dotenv==1.0.1
-pytest==7.4.2
+
+# -----------------------------
+# Testing
+# -----------------------------
+# The suite runs fully offline: Redis and Pub/Sub are replaced by in-process
+# doubles defined in tests/conftest.py, so no fakeredis/emulator is needed and
+# CI requires no service containers.
+pytest>=7.4.2
