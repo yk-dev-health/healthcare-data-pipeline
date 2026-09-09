@@ -214,6 +214,7 @@ by a design.
 | Celery async dispatch | Runs against a real Redis broker |
 | Pub/Sub publish | **Interface only.** Unit-tested against a fake client; not exercised against live GCP |
 | BigQuery warehouse (`worker/bigquery_integration.py`) | **Standalone module.** Unit-tested with mocks; not yet wired into the processing path |
+| Docker image / Cloud Run deployment | Container builds and runs; deployable via `scripts/deploy_cloud_run.sh` in a Pub/Sub-and-Redis-disabled smoke-test configuration (see below) |
 
 Publishing is opt-in via `PUBSUB_ENABLED`, defaulting to on only when
 credentials or an emulator host are present. With it off, `publish()` returns a
@@ -249,6 +250,36 @@ and BigQuery for the durable record, both of which are already dependencies.
 The processing path itself has no such constraint: idempotency, quarantine and
 the audit trail are all external, so *correctness* under multiple workers is
 already handled. It is only these two read views that are not.
+
+## Cloud Run Deployment (Manual Smoke Test)
+
+`scripts/deploy_cloud_run.sh` builds the container and deploys the API to
+Cloud Run in a cost-free configuration: `min-instances=0`, `PUBSUB_ENABLED=false`,
+and `IDEMPOTENCY_FAIL_MODE=open` so the service serves traffic without a
+provisioned Pub/Sub topic or Redis instance (both of which carry ongoing
+cost — Memorystore in particular has no free tier). This validates that the
+container starts, passes its own `validate_for_runtime()` checks, and answers
+`/health/live` and `/health/ready` from a real Cloud Run instance; it does
+**not** validate the Pub/Sub or Redis paths end to end, which stay covered by
+the local/emulator setup described above.
+
+```bash
+PROJECT_ID=your-gcp-project ./scripts/deploy_cloud_run.sh
+```
+
+Requirements: `gcloud` authenticated (`gcloud auth login`) against a project
+with billing enabled — Cloud Run requires a billing account to be attached
+even when usage stays inside the free tier (2M requests / 180K vCPU-seconds /
+360K GiB-seconds per month, plus 0.5 GB of free Artifact Registry storage).
+At `min-instances=0` and low request volume, this deployment is not expected
+to incur any charges.
+
+Do not point this configuration at real patient data: `IDEMPOTENCY_FAIL_MODE=open`
+accepts duplicate-processing risk during a store outage and is blocked in a
+genuine `APP_ENV=production` deployment by `validate_for_runtime()` — this
+smoke-test config deliberately stays on `APP_ENV=development` to bypass that
+gate, which is only appropriate because there is no real PHI and no
+provisioned Redis/Pub-Sub behind it.
 
 ## Local Environment Quickstart
 
