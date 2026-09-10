@@ -18,6 +18,7 @@ from common.errors import (
 from common.idempotency import IdempotencyStore, derive_event_id
 from common.quarantine import QuarantineSink
 from common.redis_support import get_redis_client
+from worker.clinical_quality import validate_dicom_event as validate_clinical_quality
 from worker.data_minimization import (
     PatientPseudonymizer,
     create_minimized_payload,
@@ -395,6 +396,14 @@ def process_dicom_event(event: dict) -> dict:
         fields_removed=pii_removed_fields,
         purpose="gdpr_principle_3_minimization",
     )
+
+    # Invoke the clinical quality engine (clinical-data-quality-analysis) on
+    # the de-identified acquisition metadata only. Raises ClinicalValidationError
+    # (permanent -> quarantine+ack) or ClinicalQualityEngineError (transient ->
+    # nack+retry); both propagate to PubSubMessageHandler.handle, which already
+    # holds this event's idempotency claim and releases it on either failure
+    # path (see worker/message_handler.py step 3).
+    validate_clinical_quality(deidentified, request_id=event_id)
 
     # Principle 5: Storage Limitation
     # Create shadow record for audit linkage (90-day retention)

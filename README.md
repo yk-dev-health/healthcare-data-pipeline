@@ -215,6 +215,7 @@ by a design.
 | Pub/Sub publish | **Interface only.** Unit-tested against a fake client; not exercised against live GCP |
 | BigQuery warehouse (`worker/bigquery_integration.py`) | **Standalone module.** Unit-tested with mocks; not yet wired into the processing path |
 | Docker image / Cloud Run deployment | Container builds and runs; deployable via `scripts/deploy_cloud_run.sh` in a Pub/Sub-and-Redis-disabled smoke-test configuration (see below) |
+| Clinical quality engine (`worker/clinical_quality.py`) | Runs locally against the real `healthcli.contracts` library call; covered by `tests/test_clinical_quality_contract.py`. No live GCP or clinical-data-quality-analysis service involved — it is a plain in-process function call |
 
 Publishing is opt-in via `PUBSUB_ENABLED`, defaulting to on only when
 credentials or an emulator host are present. With it off, `publish()` returns a
@@ -250,6 +251,71 @@ and BigQuery for the durable record, both of which are already dependencies.
 The processing path itself has no such constraint: idempotency, quarantine and
 the audit trail are all external, so *correctness* under multiple workers is
 already handled. It is only these two read views that are not.
+
+## Clinical Quality Engine Integration
+
+This repository owns event-driven ingestion, Pub/Sub delivery, Redis
+idempotency, retries, and quarantine. A separate repository,
+[clinical-data-quality-analysis](https://github.com/yk-dev-health/clinical-data-quality-analysis),
+owns tabular clinical quality rules, FHIR R4 validation, and quality metrics.
+The two are connected through a stable typed contract
+(`healthcli.contracts.ProcessingRequest` / `ProcessingResult` /
+`RecordOutcome`, versioned via `CONTRACT_VERSION`) rather than by duplicating
+clinical validation logic in the worker.
+
+**Repository boundary.** Nothing in `healthcli.contracts` imports Pub/Sub,
+Redis, or BigQuery — it is a plain function call (`process_request`) that
+takes a typed request and returns a typed result. This pipeline is the one
+that owns delivery semantics; the quality engine has no opinion about how (or
+whether) its caller acks, nacks, or retries. That boundary is what lets the
+quality-engine repository's own CLI keep working without any cloud services,
+and what lets this repository swap engines later without touching Pub/Sub or
+Redis code.
+
+**Where it's wired in.** `worker/clinical_quality.py` is the seam:
+`worker.worker.process_dicom_event` calls `validate_dicom_event` on the
+already de-identified acquisition metadata (`study_uid`, `modality`, `kVp`,
+`mA`, `source` — never `patient_name` or `patient_birth_date`) after
+idempotency has already been claimed by `PubSubMessageHandler` (see
+`worker/message_handler.py`), so:
+
+- `RecordOutcome.REJECTED` → `ClinicalValidationError` (permanent). The
+  handler's existing `PermanentError` branch quarantines the event (PHI-free:
+  field name and error type only, never the rejected value) and acks it.
+  Idempotency is released so the (permanently invalid) event_id does not stay
+  claimed forever.
+- An engine call that raises unexpectedly, or `healthcli` not being installed
+  at all, → `ClinicalQualityEngineError` (transient). The handler's existing
+  `TransientError` branch nacks so Pub/Sub redelivers, up to the configured
+  delivery-attempt budget.
+- A validated record returns normally and processing continues — the commit
+  order (`IdempotencyStore.commit` before `message.ack()`) is unchanged from
+  the pre-existing receive path.
+
+No new ack/nack branch was added to `PubSubMessageHandler`: both new error
+types are ordinary `PermanentError`/`TransientError` subclasses, so the
+existing decision table in `worker/message_handler.py` covers them.
+
+**Schema.** `config/dicom_quality_schema.yaml` defines the de-identified DICOM
+acquisition-metadata schema passed to the engine — independent of the tabular
+clinical-trial schema (`config/schema.yaml` in the sibling repository) that
+ships with clinical-data-quality-analysis's own CLI.
+
+**Dependency.** Pulled in as a normal package
+(`git+https://github.com/yk-dev-health/clinical-data-quality-analysis.git@main`
+in `requirements.txt`) rather than assumed to be a sibling checkout on disk,
+so `pip install -r requirements.txt` is enough on a fresh clone or in CI. The
+import in `worker/clinical_quality.py` is still lazy and guarded: an
+environment that has not installed it fails DICOM events as a transient error
+(retry) rather than crashing on import, so the rest of the API/worker import
+path is unaffected.
+
+**Tests.** `tests/test_clinical_quality_contract.py` covers both outcomes end
+to end through `PubSubMessageHandler` (rejected → quarantined + acked; engine
+fault → retried, not quarantined) plus the direct
+`worker.clinical_quality.validate_dicom_event` contract. It runs against the
+real `healthcli.contracts` module with local, in-memory inputs only — no live
+GCP credentials, matching the rest of this suite's offline guarantee.
 
 ## Cloud Run Deployment (Manual Smoke Test)
 

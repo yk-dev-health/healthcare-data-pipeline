@@ -37,10 +37,12 @@ __all__ = [
     "ConsentMissingError",
     "PurposeLimitationError",
     "RetryBudgetExhaustedError",
+    "ClinicalValidationError",
     "RedisUnavailableError",
     "IdempotencyBackendError",
     "PublishError",
     "DownstreamUnavailableError",
+    "ClinicalQualityEngineError",
 ]
 
 
@@ -181,6 +183,41 @@ class RetryBudgetExhaustedError(PermanentError):
     code = "retry_budget_exhausted"
 
 
+class ClinicalValidationError(PermanentError):
+    """The clinical quality engine rejected the record.
+
+    Raised when ``healthcli.contracts.process_request`` (from the sibling
+    clinical-data-quality-analysis repository) returns
+    ``RecordOutcome.REJECTED``. The rejection is a data-quality fact about
+    this specific record, not an infrastructure fault, so redelivering it
+    would produce the same rejection every time: it is quarantined and
+    acknowledged rather than retried.
+    """
+
+    code = "clinical_validation_failed"
+
+    def __init__(
+        self,
+        message: str = "record failed clinical quality validation",
+        *,
+        field_errors: list[dict[str, Any]] | None = None,
+        schema_version: str | None = None,
+    ) -> None:
+        self.field_errors = list(field_errors or [])
+        super().__init__(
+            message,
+            context={
+                "schema_version": schema_version,
+                "rejected_count": len(self.field_errors),
+            },
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = super().to_dict()
+        payload["field_errors"] = self.field_errors
+        return payload
+
+
 # --------------------------------------------------------------------------
 # Transient failures - infrastructure. Redeliver.
 # --------------------------------------------------------------------------
@@ -212,3 +249,16 @@ class DownstreamUnavailableError(TransientError):
     """A downstream sink (BigQuery, object store, index) rejected the write."""
 
     code = "downstream_unavailable"
+
+
+class ClinicalQualityEngineError(TransientError):
+    """The clinical quality engine could not be invoked at all.
+
+    Distinct from :class:`ClinicalValidationError`: this is an infrastructure
+    fault in the engine call itself (an unexpected exception, a schema file
+    that failed to load), not a verdict on the record's content. The same
+    message may well succeed once the fault clears, so it is retried rather
+    than quarantined.
+    """
+
+    code = "clinical_quality_engine_unavailable"

@@ -1,0 +1,28 @@
+# Dataset-level schema contract for the clinical-data-quality-analysis engine
+# (see worker/clinical_quality.py), covering de-identified DICOM acquisition
+# metadata only -- never patient_name or patient_birth_date, which are already
+# redacted before this schema is applied.
+#
+# schema_version follows semver-lite (MAJOR.MINOR), independent of the
+# ProcessingRequest contract_version in healthcli.contracts. Increment MAJOR
+# when a required column is added/removed or a type becomes stricter;
+# increment MINOR for additive, backwards-compatible changes.
+schema_version: "1.0"
+
+columns:
+  study_uid:
+    required: true
+    dtype: string
+  modality:
+    required: true
+    dtype: string
+    vocabulary: [CT, MRI, US, DX, CR]
+  source:
+    required: false
+    dtype: string
+  kVp:
+    required: false
+    dtype: float
+  mA:
+    required: false
+    dtype: float

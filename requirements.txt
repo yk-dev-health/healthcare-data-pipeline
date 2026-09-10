@@ -43,9 +43,21 @@ structlog==24.4.0
 python-dotenv==1.0.1
 
 # -----------------------------
+# Clinical quality engine (issue #7: healthcare-data-pipeline <-> clinical-data-quality-analysis)
+# -----------------------------
+# Pulled in as a regular package so `pip install -r requirements.txt` works in
+# CI and on a fresh clone, without assuming a sibling checkout on disk. See
+# worker/clinical_quality.py: the import is still optional/lazy there, so a
+# worker that has not installed this dependency fails a DICOM event as a
+# transient error (retry) rather than crashing on import.
+git+https://github.com/yk-dev-health/clinical-data-quality-analysis.git@main#egg=clinical-data-quality-analysis
+
+# -----------------------------
 # Testing
 # -----------------------------
 # The suite runs fully offline: Redis and Pub/Sub are replaced by in-process
 # doubles defined in tests/conftest.py, so no fakeredis/emulator is needed and
-# CI requires no service containers.
+# CI requires no service containers. The clinical quality engine dependency
+# above is a real (installed) library call with no network or cloud access of
+# its own, so it does not break that offline guarantee.
 pytest>=7.4.2
