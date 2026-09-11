@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/yk-dev-health/healthcare-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/yk-dev-health/healthcare-data-pipeline/actions/workflows/ci.yml)
 
-An asynchronous data pipeline built with **FastAPI**, **Celery**, **Redis** and **Google Cloud Pub/Sub**, for processing medical imaging metadata (DICOM) under **UK GDPR**.
+An asynchronous data pipeline built with **FastAPI**, **Celery**, **Redis** and **Google Cloud Pub/Sub**, for processing medical imaging metadata (DICOM) under **UK GDPR**. The ingestion shape — a PACS pushing DICOM study metadata into a queue ahead of downstream analytics — mirrors how a Trust's imaging systems typically hand off to a reporting or research pipeline; it does not implement PACS itself, or any NHS-specific transport (e.g. IHE profiles).
 
 It is built around the property that makes message-driven clinical pipelines
 hard: Pub/Sub delivers **at-least-once**, so duplicates, redeliveries and poison
@@ -144,7 +144,17 @@ digest of the rejected body instead of the body itself.
 
 ## UK GDPR Compliance Mapping (Compliance-as-Code)
 
-This platform explicitly treats regulatory requirements as non-functional architectural constraints. Below is the direct structural mapping between **UK GDPR Article 5 Principles** and this codebase:
+This platform explicitly treats regulatory requirements as non-functional architectural constraints. Below is the direct structural mapping between **UK GDPR Article 5 Principles** and this codebase.
+
+UK GDPR is the statutory baseline; an NHS Trust or supplier also has to
+demonstrate the same minimisation, retention and access-control behaviour
+against the **NHS Data Security and Protection Toolkit (DSPT)** and the
+**Caldicott Principles** governing use of confidential patient information.
+Neither is implemented as a separate control here — they are different
+audiences for the same evidence, not additional code — but they are why the
+mapping below is expressed as "which field, which line, which test" rather
+than a prose claim of compliance: that is the form a DSPT or Caldicott
+Guardian review actually asks for.
 
 ### 1. Data Minimisation (Principle 3)
 
@@ -235,7 +245,7 @@ gcloud beta emulators pubsub start --host-port=localhost:8085
 export PUBSUB_EMULATOR_HOST=localhost:8085   # PUBSUB_ENABLED flips on automatically
 ```
 
-### Two boundaries drawn on purpose
+### Three boundaries drawn on purpose
 
 **Authentication is not implemented, by design.** `require_role` compares an
 `x-role` request header and is a *placeholder*, not a security control — the
@@ -255,13 +265,26 @@ The processing path itself has no such constraint: idempotency, quarantine and
 the audit trail are all external, so *correctness* under multiple workers is
 already handled. It is only these two read views that are not.
 
+**`patient_id` is a generic string, not a validated NHS Number.**
+`common/schemas.py` and `worker/data_minimization.py` treat it as an opaque
+identifier to be pseudonymised, with no modulus-11 checksum validation or
+other NHS Number–specific parsing. A deployment ingesting real NHS Number data
+would add that validation at the schema boundary (`DicomIngestionPayload` /
+`ClinicalEvent`) before the value ever reaches the pseudonymiser — this
+pipeline's minimisation and retention behaviour do not depend on which
+identifier scheme is used upstream of that point.
+
 ## Clinical Quality Engine Integration
 
 This repository owns event-driven ingestion, Pub/Sub delivery, Redis
 idempotency, retries, and quarantine. A separate repository,
 [clinical-data-quality-analysis](https://github.com/yk-dev-health/clinical-data-quality-analysis),
 owns tabular clinical quality rules, FHIR R4 validation, and quality metrics.
-The two are connected through a stable typed contract
+The current integration (`worker/clinical_quality.py`) sends de-identified
+DICOM acquisition fields through that contract for dataset-shape validation
+only — it does not exercise the sibling repository's FHIR R4 validator, which
+operates on the tabular clinical-trial data its own CLI ingests, not on this
+pipeline's DICOM events. The two are connected through a stable typed contract
 (`healthcli.contracts.ProcessingRequest` / `ProcessingResult` /
 `RecordOutcome`, versioned via `CONTRACT_VERSION`) rather than by duplicating
 clinical validation logic in the worker.
@@ -544,4 +567,6 @@ To transition this system into a multi-region live environment, the following in
 2. **On-Demand GDPR Art. 17 Endpoints:** Distributed purge hooks to wipe matching `pseudonym_id` blocks on erasure request, using the shadow records in `data_minimization.py` for linkage.
 3. **Broker-side Dead Letter Topic:** The quarantine sink is currently a local JSONL file. Attaching a Pub/Sub dead-letter topic with `maxDeliveryAttempts` matching `PUBSUB_MAX_DELIVERY_ATTEMPTS` moves it to durable, replayable storage.
 4. **Metrics export:** `PubSubMessageHandler` already emits a structured `HandlerResult` per delivery through an `on_result` hook; wiring it to Prometheus gives duplicate rate, quarantine rate and retry depth without further instrumentation.
-5. **Real authentication.** `require_role` (`api/main.py`) is a placeholder that trusts an unverified `x-role` header — see [Two boundaries drawn on purpose](#two-boundaries-drawn-on-purpose). In deployment this sits behind an API Gateway or IAP that authenticates the caller and injects a verified identity into that seam; a bespoke auth scheme was deliberately not built for a pipeline project.
+5. **Real authentication.** `require_role` (`api/main.py`) is a placeholder that trusts an unverified `x-role` header — see [Three boundaries drawn on purpose](#three-boundaries-drawn-on-purpose). In deployment this sits behind an API Gateway or IAP that authenticates the caller and injects a verified identity into that seam; a bespoke auth scheme was deliberately not built for a pipeline project.
+6. **NHS Number validation.** As noted above, `patient_id` is currently a generic string. Adding modulus-11 checksum validation at the schema boundary would be required before this pipeline could ingest real NHS Number–bearing data.
+7. **Clinical safety case (DCB0129/DCB0160).** A live NHS deployment of any system touching patient data needs a documented clinical risk management file under DCB0129 (manufacturers) or DCB0160 (deploying organisations). Nothing here substitutes for that process; the audit trail and PHI-containment tests in this repository would be inputs to, not a replacement for, that safety case.
