@@ -9,7 +9,7 @@ hard: Pub/Sub delivers **at-least-once**, so duplicates, redeliveries and poison
 messages are documented behaviour rather than edge cases. Every dependency
 outage has a stated, tested response instead of an accidental one.
 
-The whole test suite runs offline in ~6 seconds with no cloud account and no
+The whole test suite (202 tests) runs offline in a few seconds with no cloud account and no
 service containers. See [Scope](#scope-what-runs-and-where) for exactly which
 parts are exercised end to end and which are verified at the interface.
 
@@ -28,6 +28,7 @@ graph TB
         Queue["Redis Queue<br/>Asynchronous Task"]
         Worker["Celery Worker<br/>process_dicom_event"]
         Worker -->|Remove PII| MinData["Minimized<br/>Payload"]
+        MinData -->|De-identified fields only| QE["Clinical Quality Engine<br/>(clinical-data-quality-analysis)"]
         Worker -->|Create Pseudonym| Shadow["Shadow Record<br/>TTL: 90d"]
         Worker -->|Audit Log| Audit["audit_trail.jsonl<br/>structlog JSON"]
     end
@@ -361,16 +362,21 @@ cp .env.example .env
 
 ```
 
-Ensure your local `.env` contains the required encryption seeds and infrastructure keys:
+At minimum, set these in your local `.env` (see `.env.example` for the full,
+documented list):
 
 ```ini
 PROJECT_ID=healthcare-pipeline-yk-01
 REDIS_URL=redis://localhost:6379/0
 SENSITIVE_DATA_TTL=3600
-BQ_RETENTION_EVENTS_DAYS=90
-APP_SECRET_SALT=your_secure_cryptographic_salt_here
+PATIENT_HASH_SALT=your_secure_cryptographic_salt_here
 
 ```
+
+`PATIENT_HASH_SALT` matters even for local runs: leaving the built-in default
+is fine in development, but `validate_for_runtime()` (`common/config.py`)
+refuses to start with it under `APP_ENV=production`, because a known salt
+makes every pseudonym reversible by dictionary attack.
 
 ### 2. Multi-Terminal Cluster Setup
 
@@ -399,10 +405,12 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
 ## Verification & Testing Strategy
 
-190 tests covering delivery semantics, duplicate suppression, schema
-enforcement and PHI containment. The suite runs **fully offline in ~5 seconds**
-— Redis and Pub/Sub are replaced by in-process doubles in `tests/conftest.py`,
-so CI needs no service containers and no GCP credentials.
+202 tests covering delivery semantics, duplicate suppression, schema
+enforcement, PHI containment, and the clinical quality engine contract.
+The suite runs **fully offline in a few seconds** — Redis and Pub/Sub are
+replaced by in-process doubles in `tests/conftest.py`, so CI needs no service
+containers and no GCP credentials. See the [CI workflow](.github/workflows/ci.yml)
+for the exact command this project runs on every push.
 
 ```bash
 python -m pytest -q
@@ -426,6 +434,7 @@ Two design choices make the reliability behaviour testable at all:
 | `test_api_error_handling.py` | status codes, no PHI in 4xx/5xx bodies, health probes |
 | `test_redis_resilience.py` | lazy connect, timeouts, circuit breaker, recovery without restart |
 | `test_pubsub_publisher.py` | lazy client, bounded publish, typed failures, attribute hygiene |
+| `test_clinical_quality_contract.py` | clinical quality engine contract, quarantine vs retry mapping |
 
 ### Ingestion Validation Scenario
 
@@ -535,3 +544,4 @@ To transition this system into a multi-region live environment, the following in
 2. **On-Demand GDPR Art. 17 Endpoints:** Distributed purge hooks to wipe matching `pseudonym_id` blocks on erasure request, using the shadow records in `data_minimization.py` for linkage.
 3. **Broker-side Dead Letter Topic:** The quarantine sink is currently a local JSONL file. Attaching a Pub/Sub dead-letter topic with `maxDeliveryAttempts` matching `PUBSUB_MAX_DELIVERY_ATTEMPTS` moves it to durable, replayable storage.
 4. **Metrics export:** `PubSubMessageHandler` already emits a structured `HandlerResult` per delivery through an `on_result` hook; wiring it to Prometheus gives duplicate rate, quarantine rate and retry depth without further instrumentation.
+5. **Real authentication.** `require_role` (`api/main.py`) is a placeholder that trusts an unverified `x-role` header — see [Two boundaries drawn on purpose](#two-boundaries-drawn-on-purpose). In deployment this sits behind an API Gateway or IAP that authenticates the caller and injects a verified identity into that seam; a bespoke auth scheme was deliberately not built for a pipeline project.
