@@ -1,5 +1,7 @@
 # Healthcare Data Ingestion Pipeline (UK GDPR Compliant by Design)
 
+[![CI](https://github.com/yk-dev-health/healthcare-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/yk-dev-health/healthcare-data-pipeline/actions/workflows/ci.yml)
+
 An asynchronous data pipeline built with **FastAPI**, **Celery**, **Redis** and **Google Cloud Pub/Sub**, for processing medical imaging metadata (DICOM) under **UK GDPR**.
 
 It is built around the property that makes message-driven clinical pipelines
