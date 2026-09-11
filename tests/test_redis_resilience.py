@@ -184,4 +184,10 @@ class TestSocketTimeoutsAreConfigured:
 
         retry = client._default_factory().get_connection_kwargs()["retry"]
 
-        assert retry.get_retries() == 0
+        # redis-py 5.0.7 (pinned in requirements.txt) has no public
+        # `get_retries()` accessor -- that was added in a later release.
+        # Fall back to the private attribute so this assertion holds against
+        # the version this project actually installs, not just whatever a
+        # developer's virtualenv happens to have drifted to.
+        retries = retry.get_retries() if hasattr(retry, "get_retries") else retry._retries
+        assert retries == 0
